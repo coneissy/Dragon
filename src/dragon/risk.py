@@ -6,19 +6,18 @@ from decimal import Decimal
 class MaxUniverseRiskState:
     """Runtime guardrails from the MAX UNIVERSE v5 workbook."""
 
-    peak_balance_usdt: Decimal = Decimal("0")
+    starting_balance_usdt: Decimal = Decimal("9")
+    peak_balance_usdt: Decimal = Decimal("9")
+    cumulative_pnl_usdt: Decimal = Decimal("0")
     consecutive_losses: int = 0
     kill_switch: bool = False
 
-    def observe_balance(self, balance_usdt: Decimal) -> None:
-        balance = Decimal(str(balance_usdt))
+    def record(self, pnl_usdt: Decimal, *, max_consecutive_losses: int = 5, max_drawdown_pct: float = 15.0) -> None:
+        pnl = Decimal(str(pnl_usdt))
+        self.cumulative_pnl_usdt += pnl
+        balance = self.starting_balance_usdt + self.cumulative_pnl_usdt
         if balance > self.peak_balance_usdt:
             self.peak_balance_usdt = balance
-
-    def record(self, pnl_usdt: Decimal, balance_usdt: Decimal, *, max_consecutive_losses: int = 5, max_drawdown_pct: float = 15.0) -> None:
-        pnl = Decimal(str(pnl_usdt))
-        balance = Decimal(str(balance_usdt))
-        self.observe_balance(balance)
         if pnl < 0:
             self.consecutive_losses += 1
         elif pnl > 0:
@@ -35,6 +34,15 @@ class MaxUniverseRiskState:
         return not self.kill_switch
 
 
+# Shared process-level guard. Ledger updates it after completed trades and the
+# budget function consults it before every new execution attempt.
+MAX_UNIVERSE_RISK = MaxUniverseRiskState()
+
+
+def record_max_universe_trade(pnl_usdt: Decimal) -> None:
+    MAX_UNIVERSE_RISK.record(pnl_usdt)
+
+
 def approved(
     net_bps: Decimal,
     min_net_bps: float,
@@ -44,13 +52,13 @@ def approved(
     min_trade_notional: Decimal | None = None,
     risk_state: MaxUniverseRiskState | None = None,
 ) -> bool:
-    if risk_state is not None and not risk_state.can_trade():
+    state = risk_state or MAX_UNIVERSE_RISK
+    if not state.can_trade():
         return False
     if net_bps < Decimal(str(min_net_bps)):
         return False
     if not Decimal("0") < notional:
         return False
-    # max_notional=0 means dynamic/no fixed dollar cap.
     if max_notional > 0 and notional > Decimal(str(max_notional)):
         return False
     if min_trade_notional is not None and notional < min_trade_notional:
@@ -73,7 +81,7 @@ def risk_budget(
     A positive max_notional remains an optional hard ceiling; zero means no
     fixed dollar ceiling so the allocation can compound with the account.
     """
-    if free_usdt <= 0:
+    if not MAX_UNIVERSE_RISK.can_trade() or free_usdt <= 0:
         return Decimal("0")
     if Decimal(str(risk_pct)) <= 0:
         return Decimal("0")
