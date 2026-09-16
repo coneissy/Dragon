@@ -76,16 +76,9 @@ def _walk(symbol: str, side: str, qty: Decimal, books: dict):
 
 
 def _dynamic_safety_bps(t: Triangle, books: dict, symbol_meta: dict, start: Decimal, max_safety_bps: float) -> Decimal:
-    """Select latency/repricing safety from live top-level liquidity.
-
-    Actual book impact is already priced by _walk. This is only an additional
-    safety margin: 3 bps for deep books, 5 bps for normal books, 10 bps for
-    thinner books and 20 bps for very thin books, capped by configuration.
-    """
     cap = Decimal(str(max(0.0, max_safety_bps)))
     if cap <= 0:
         return Decimal("0")
-
     amount = start
     ratios = []
     for i, symbol in enumerate(t.symbols):
@@ -114,7 +107,6 @@ def _dynamic_safety_bps(t: Triangle, books: dict, symbol_meta: dict, start: Deci
         if out is None:
             return cap
         amount = out
-
     worst = max(ratios, default=Decimal("999"))
     if worst <= Decimal("0.25"):
         selected = Decimal("3")
@@ -127,28 +119,27 @@ def _dynamic_safety_bps(t: Triangle, books: dict, symbol_meta: dict, start: Deci
     return min(cap, selected)
 
 
-def evaluate_triangle(t: Triangle, books, fee_bps, slippage_bps, symbol_meta=None, notional_usdt=1.0):
-    """Evaluate an exact three-leg path using live depth.
+def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_meta=None, notional_usdt=1.0):
+    """Return the authoritative projected three-leg execution outcome.
 
-    Gross edge is deliberately calculated before trading fees. Each leg is
-    priced from executable order-book depth, so the gross result already
-    reflects the actual VWAP/depth available for the requested notional.
-    Fees are then compounded separately across all three legs to produce the
-    post-fee executable result. The configured slippage value is an additional
-    latency/repricing safety buffer, not book impact already captured by _walk.
+    The same quantity produced by each leg is propagated into the next leg.
+    Each leg is priced through available depth and then charged the configured
+    taker fee. This is a pre-trade projection only. Actual execution must still
+    use returned fills and commissionAsset/commission from Binance responses.
     """
     symbol_meta = symbol_meta or {}
     start = Decimal(str(notional_usdt))
-    if start <= 0 or not all(s in books for s in t.symbols):
+    if start <= 0 or len(t.symbols) != 3:
         return None
 
     gross_amount = start
     net_amount = start
-    used = []
     fee_factor = Decimal("1") - Decimal(str(fee_bps)) / Decimal("10000")
     if fee_factor <= 0:
         return None
 
+    legs = []
+    total_fee_equivalent = Decimal("0")
     for i, symbol in enumerate(t.symbols):
         meta = symbol_meta.get(symbol)
         if not meta:
@@ -157,28 +148,72 @@ def evaluate_triangle(t: Triangle, books, fee_bps, slippage_bps, symbol_meta=Non
         dst = t.assets[(i + 1) % 3]
         base, quote = meta
         if src == quote and dst == base:
-            side = "buy"
+            side = "BUY"
         elif src == base and dst == quote:
-            side = "sell"
+            side = "SELL"
         else:
             return None
 
-        # Gross path: executable depth only, with no fee deduction.
-        gross_amount = _walk(symbol, side, gross_amount, books)
-        if gross_amount is None or gross_amount <= 0:
+        book = books.get(symbol, {})
+        levels = book.get("asks" if side == "BUY" else "bids") or []
+        if not levels:
+            return None
+        top_price = Decimal(str(levels[0][0]))
+
+        gross_next = _walk(symbol, side.lower(), gross_amount, books)
+        net_before_fee = _walk(symbol, side.lower(), net_amount, books)
+        if gross_next is None or net_before_fee is None or gross_next <= 0 or net_before_fee <= 0:
             return None
 
-        # Net path: the same executable depth, with the fee applied after
-        # each completed leg so the three-leg fee is compounded correctly.
-        net_amount = _walk(symbol, side, net_amount, books)
-        if net_amount is None or net_amount <= 0:
-            return None
-        net_amount *= fee_factor
-        if net_amount <= 0:
-            return None
-        used.append(symbol)
+        fee = net_before_fee * (Decimal("1") - fee_factor)
+        net_next = net_before_fee * fee_factor
+        impact_bps = (net_before_fee / net_amount - gross_next / gross_amount) * Decimal("10000") if gross_amount > 0 and net_amount > 0 else Decimal("0")
+        legs.append({
+            "symbol": symbol,
+            "side": side,
+            "input_asset": src,
+            "output_asset": dst,
+            "input_amount": str(net_amount),
+            "output_before_fee": str(net_before_fee),
+            "output_after_fee": str(net_next),
+            "fee": str(fee),
+            "top_price": str(top_price),
+            "depth_impact_bps": str(impact_bps),
+        })
+        total_fee_equivalent += fee
+        gross_amount = gross_next
+        net_amount = net_next
 
-    gross_bps = (gross_amount / start - Decimal("1")) * Decimal("10000")
     safety_bps = _dynamic_safety_bps(t, books, symbol_meta, start, slippage_bps)
-    net_bps = (net_amount / start - Decimal("1")) * Decimal("10000") - safety_bps
-    return net_bps, gross_bps, tuple(used), t.assets[1], t.assets[2]
+    gross_pnl = gross_amount - start
+    net_pnl_before_safety = net_amount - start
+    safety_cost = start * safety_bps / Decimal("10000")
+    projected_final = net_amount - safety_cost
+    net_pnl = projected_final - start
+    gross_bps = gross_pnl / start * Decimal("10000")
+    net_bps = net_pnl / start * Decimal("10000")
+    return {
+        "start_usdt": start,
+        "gross_final": gross_amount,
+        "gross_pnl_usdt": gross_pnl,
+        "gross_bps": gross_bps,
+        "post_fee_final": net_amount,
+        "net_pnl_before_safety_usdt": net_pnl_before_safety,
+        "safety_bps": safety_bps,
+        "safety_cost_usdt": safety_cost,
+        "final_usdt": projected_final,
+        "net_pnl_usdt": net_pnl,
+        "net_bps": net_bps,
+        "total_fee_equivalent": total_fee_equivalent,
+        "legs": legs,
+        "path": t.symbols,
+        "first_asset": t.assets[1],
+        "second_asset": t.assets[2],
+    }
+
+
+def evaluate_triangle(t: Triangle, books, fee_bps, slippage_bps, symbol_meta=None, notional_usdt=1.0):
+    outcome = evaluate_triangle_outcome(t, books, fee_bps, slippage_bps, symbol_meta, notional_usdt)
+    if not outcome:
+        return None
+    return outcome["net_bps"], outcome["gross_bps"], outcome["path"], outcome["first_asset"], outcome["second_asset"]
