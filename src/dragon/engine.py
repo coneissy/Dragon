@@ -54,7 +54,44 @@ def main():
     from src.dragon import main as dragon_main
     from src.dragon.hardening import install
     from src.dragon.dashboard import HTML as DASHBOARD_HTML
+    from full_universe_runner_v3 import full_universe_stream_loop
+    import web_runner
     import websockets
+
+    # The full-universe runner is the production scanner. Install it before
+    # hardening so the hardening layer wraps the actual stream-loop seam.
+    dragon_main.stream_loop = full_universe_stream_loop
+
+    # The full-universe runner calls web_runner directly. Mirror dynamic fees
+    # and the final authenticated balance gate onto that live execution path.
+    original_web_evaluate = web_runner.evaluate_triangle
+
+    def hardened_web_evaluate(t, books, fee_bps, slippage_bps, symbol_meta=None, notional_usdt=1.0):
+        with dragon_main.LOCK:
+            dynamic_fee = dragon_main.STATE.get("dynamic_fee_bps")
+        effective_fee = Decimal(str(dynamic_fee)) if dynamic_fee not in (None, "", 0, 0.0) else Decimal(str(fee_bps))
+        return original_web_evaluate(t, books, effective_fee, slippage_bps, symbol_meta, notional_usdt)
+
+    web_runner.evaluate_triangle = hardened_web_evaluate
+
+    original_web_execute = web_runner.execute_triangle
+
+    def hardened_web_execute(client, path, start_asset, first_asset, budget, filters, dry_run):
+        cfg = dragon_main.Config.from_env()
+        if cfg.live_trading and not cfg.dry_run:
+            account = client.account()
+            free_usdt = Decimal(str(next((x.get("free", "0") for x in account.get("balances", []) if x.get("asset") == "USDT"), "0")))
+            reserve = Decimal(str(cfg.safety_reserve_usdt))
+            if free_usdt - reserve < Decimal(str(budget)):
+                with dragon_main.LOCK:
+                    dragon_main.STATE["free_usdt"] = str(free_usdt)
+                    dragon_main.STATE.setdefault("rejection", {})
+                    dragon_main.STATE["rejection"]["FINAL_BALANCE_REJECTED"] = dragon_main.STATE["rejection"].get("FINAL_BALANCE_REJECTED", 0) + 1
+                dragon_main.event("GATE", "Final balance recheck blocked order", free_usdt=str(free_usdt), reserve=str(reserve), budget=str(budget))
+                raise RuntimeError("final balance recheck failed: executable balance below budget plus safety reserve")
+        return original_web_execute(client, path, start_asset, first_asset, budget, filters, dry_run)
+
+    web_runner.execute_triangle = hardened_web_execute
 
     install(dragon_main)
     dragon_main.DASHBOARD = DASHBOARD_HTML
@@ -84,8 +121,8 @@ def main():
 
     dragon_main.Handler.do_GET = dashboard_root
 
-    # Evaluator telemetry plus a short-lived signal cache used by the final
-    # order gate. This does not alter the executable-edge formula.
+    # Evaluator telemetry plus a short-lived signal cache used by the canonical
+    # main-module order path. The full-universe path has its own live gate.
     original_evaluate = dragon_main.evaluate_triangle
     last_signal = {}
 
@@ -160,8 +197,6 @@ def main():
         if not (cfg.live_trading and not cfg.dry_run):
             return original_execute(client, path, start_asset, first_asset, budget, filters, dry_run)
 
-        # Final authenticated balance recheck. The periodic scanner balance is
-        # not trusted for the actual order decision.
         account = client.account()
         free_usdt = Decimal(str(next((x.get("free", "0") for x in account.get("balances", []) if x.get("asset") == "USDT"), "0")))
         reserve = Decimal(str(cfg.safety_reserve_usdt))
@@ -179,7 +214,6 @@ def main():
 
     dragon_main.execute_triangle = guarded_execute
 
-    # Dragon is explicitly Spot-only. Ignore stale Futures environment flags.
     async def supervisor():
         await dragon_main.run()
 
