@@ -129,7 +129,7 @@ def _fee_factor(fee_bps: Decimal) -> Decimal:
 
 
 def _three_leg_fee_drag_bps(fee_bps: Decimal, legs: int = 3) -> Decimal:
-    """Return the exact compounded fee drag for N legs."""
+    """Exact compounded fee drag for N sequential percentage fees."""
     if legs <= 0 or fee_bps < 0:
         return Decimal("0")
     factor = _fee_factor(fee_bps)
@@ -139,7 +139,7 @@ def _three_leg_fee_drag_bps(fee_bps: Decimal, legs: int = 3) -> Decimal:
 
 
 def _break_even_gross_bps(fee_bps: Decimal, legs: int = 3, safety_bps: Decimal = Decimal("0")) -> Decimal:
-    """Gross edge required to cover compounded fees and multiplicative safety."""
+    """Gross edge required for zero projected P&L after fees and safety."""
     if legs <= 0 or fee_bps < 0 or safety_bps < 0:
         return Decimal("0")
     fee_factor = _fee_factor(fee_bps)
@@ -150,11 +150,11 @@ def _break_even_gross_bps(fee_bps: Decimal, legs: int = 3, safety_bps: Decimal =
 
 
 def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_meta=None, notional_usdt=1.0):
-    """Evaluate a 3-leg triangle with executable depth and exactly one fee per leg.
+    """Authoritative executable triangle calculation.
 
-    Depth walking captures executable market impact. Configured slippage is a
-    multiplicative safety haircut applied after fees, so break-even and the
-    projected final amount use the same mathematical model.
+    Formula: start -> depth execution on each leg -> one fee on each leg ->
+    multiplicative safety haircut -> projected final USDT. Depth impact is
+    measured from actual executable levels and is not added again as slippage.
     """
     symbol_meta = symbol_meta or {}
     start = Decimal(str(notional_usdt))
@@ -243,6 +243,13 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
     depth_adjusted_gross_bps = gross_bps
     cost_to_break_even_bps = break_even_gross_bps - gross_bps
 
+    # Independent reconciliation values make dashboard/runtime audits explicit.
+    fee_drag_actual_bps = actual_fee_total / start * Decimal("10000")
+    safety_drag_bps = safety_cost / start * Decimal("10000")
+    total_cost_bps = gross_bps - net_bps
+    projected_from_multiplier = start * (net_amount / start) * safety_factor
+    reconciliation_error_usdt = projected_final - projected_from_multiplier
+
     return {
         "start_usdt": start,
         "gross_final": gross_amount,
@@ -256,14 +263,20 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
         "fee_bps_per_leg": fee_bps,
         "fee_drag_bps": total_fee_drag_bps,
         "fee_drag_equivalent_usdt": fee_drag_equivalent_usdt,
+        "fee_drag_actual_bps": fee_drag_actual_bps,
         "break_even_gross_bps": break_even_gross_bps,
         "cost_to_break_even_bps": cost_to_break_even_bps,
         "depth_drag_bps": total_depth_drag_bps,
         "safety_bps": safety_bps,
+        "safety_drag_bps": safety_drag_bps,
         "safety_cost_usdt": safety_cost,
+        "total_cost_bps": total_cost_bps,
+        "execution_multiplier_before_safety": net_amount / start,
+        "execution_multiplier_final": projected_final / start,
         "final_usdt": projected_final,
         "net_pnl_usdt": net_pnl,
         "net_bps": net_bps,
+        "reconciliation_error_usdt": reconciliation_error_usdt,
         "legs": legs,
         "path": t.symbols,
         "first_asset": t.assets[1],
