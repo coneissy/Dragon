@@ -1,4 +1,4 @@
-name: Dragon MAX UNIVERSE smoke
+name: Dragon single-engine smoke
 
 on:
   push:
@@ -15,4 +15,4 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install -r requirements.txt
-      - run: python -m pytest -q tests/test_startup_smoke.py tests/test_excel_profile.py tests/test_max_universe_risk.py
+      - run: python -m pytest -q tests/test_calculator.py tests/test_main.py tests/test_full_universe_runner_v3.py tests/test_triangles.py tests/test_risk.py
