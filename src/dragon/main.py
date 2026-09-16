@@ -1,356 +1,206 @@
+"""Dragon MAX UNIVERSE runtime: one scanner, one calculator, one decision path.
+
+The workbook is the strategy specification. Execution remains Binance-only;
+other venues are observation inputs and are never treated as execution venues.
+"""
 import asyncio
 import json
-import os
+import threading
 import time
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Lock, Thread
+from pathlib import Path
 
-import websockets
-
-from src.dragon.binance import BinanceClient
-from src.dragon.config import Config
-from src.dragon.executor import execute_triangle
-from src.dragon.ledger import Ledger
-from src.dragon.risk import approved, risk_budget
-from src.dragon.triangles import build_triangles, evaluate_triangle
+from .binance import BinanceClient, BinanceError
+from .calculator import calculate
+from .config import Config
+from .executor import execute_triangle
+from .ledger import Ledger
+from .market_data import MarketData
+from .risk import RiskState, risk_budget
+from .telemetry import Telemetry
+from .triangles import build_triangles
 
 STATE = {
-    "started_at": None, "status": "starting", "ws_connected": False,
-    "triangles": 0, "symbols": 0, "quote_updates": 0, "depth_updates": 0,
-    "scans": 0, "opportunities": 0, "executions": 0, "execution_errors": 0,
-    "risk_blocks": 0, "reconnects": 0, "last_opportunity": None,
-    "last_execution": None, "last_error": None, "recent": [],
-    "live": False, "dry_run": True, "binance_authenticated": False,
-    "free_usdt": "0", "realized_pnl_usdt": 0.0, "ledger_filled": 0,
-    "market_streams": 0, "subscription_acks": 0, "balance_refreshes": 0,
-    "min_notional_blocks": 0,
+    "health": "starting", "universe_mode": "MAX_UNIVERSE", "dry_run": True,
+    "live": False, "binance_authenticated": False, "free_usdt": 0.0,
+    "symbols": 0, "triangles": 0, "scans": 0, "opportunities": 0,
+    "evaluation_attempts": 0, "universe_qualified": 0, "universe_execution_ready": 0,
+    "universe_rejected": 0, "universe_selected": 0, "best_net_edge_bps": 0.0,
+    "warnings": [], "top_opportunities": [], "universe_top": [],
+    "ws_connected_shards": 0, "ws_total_shards": 1, "ws_health": "connecting",
+    "ws_reconnects": 0, "ws_disconnects": 0, "depth_updates": 0,
+    "ledger_filled": 0, "realized_pnl_usdt": 0.0, "balance_refreshes": 0,
+    "controls": {"kill_switch": False}, "recent": [],
 }
-LOCK = Lock()
-SERVER = None
-LEDGER = None
+STATE_LOCK = threading.Lock()
 
 
-def event(kind, message, **data):
-    item = {"ts": time.time(), "kind": kind, "message": message, **data}
-    with LOCK:
-        STATE["recent"] = (STATE["recent"] + [item])[-100:]
-    print(f"DRAGON {kind} | {message}", flush=True)
+def _state(**updates):
+    with STATE_LOCK:
+        STATE.update(updates)
+        return dict(STATE)
 
 
-class Handler(BaseHTTPRequestHandler):
+class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/":
-            self.send_response(302)
-            self.send_header("Location", "/dashboard")
-            self.end_headers(); return
-        if self.path in ("/health", "/healthz") or self.path.startswith("/health?"):
-            with LOCK:
-                payload = {"status": STATE["status"], "service": "dragon", "state": dict(STATE)}
-            body = json.dumps(payload, default=str).encode()
-            self.send_response(200 if payload["status"] in ("running", "starting", "degraded") else 503)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers(); self.wfile.write(body); return
-        if self.path in ("/dashboard", "/dashboard/"):
-            body = DASHBOARD.encode()
-            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(body)))
-            self.end_headers(); self.wfile.write(body); return
-        self.send_response(404); self.end_headers()
+        if self.path.split("?", 1)[0] not in {"/health", "/api/status", "/dashboard"}:
+            self.send_response(404); self.end_headers(); return
+        if self.path.split("?", 1)[0] == "/dashboard":
+            html = (Path(__file__).resolve().parents[2] / "dashboard.html").read_bytes()
+            self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(html))); self.end_headers(); self.wfile.write(html); return
+        body = json.dumps({"ok": True, "state": dict(STATE)}, separators=(",", ":")).encode()
+        self.send_response(200); self.send_header("Content-Type", "application/json"); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
 
-    def log_message(self, *_args):
+    def log_message(self, *_):
         return
 
 
-def start_health_server():
-    global SERVER
-    if SERVER is not None:
-        return SERVER
-    SERVER = ThreadingHTTPServer(("0.0.0.0", int(os.getenv("PORT", "10000"))), Handler)
-    Thread(target=SERVER.serve_forever, daemon=True).start()
-    return SERVER
+def start_health_server(port=10000):
+    server = ThreadingHTTPServer(("0.0.0.0", int(port)), HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 
-DASHBOARD = r'''<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Dragon Arbitrage</title><style>body{margin:0;background:#0b0d10;color:#eee;font:14px system-ui}main{max-width:1100px;margin:auto;padding:20px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}.card{background:#14181e;border:1px solid #252b34;border-radius:12px;padding:14px;margin-bottom:12px}.v{font-size:25px;font-weight:700}.muted{color:#8f98a3}.good{color:#55d68a}.warn{color:#f0c75e}.bad{color:#ff6874}.row{padding:8px 0;border-bottom:1px solid #252b34;font-size:12px}.mono{font-family:monospace}</style><main><h1>🐉 Dragon Arbitrage</h1><div id=s class=card>Loading...</div><div id=c class=grid></div><div class=card><b>Live activity</b><div id=f></div></div></main><script>async function tick(){try{let j=await(await fetch('/health?'+Date.now())).json(),s=j.state;document.getElementById('s').innerHTML='<b class="'+(s.ws_connected?'good':'bad')+'">'+(s.ws_connected?'● BINANCE WS CONNECTED':'● BINANCE WS DISCONNECTED')+'</b> &nbsp; <b class="'+(s.binance_authenticated?'good':'bad')+'">'+(s.binance_authenticated?'● BINANCE API AUTHENTICATED':'● BINANCE API NOT AUTHENTICATED')+'</b> &nbsp; <b class="'+(s.live&&!s.dry_run?'good':'warn')+'">'+(s.live&&!s.dry_run?'LIVE EXECUTION':'PAPER/SAFE')+'</b> &nbsp; <span class=muted>USDT '+s.free_usdt+' | P&L '+Number(s.realized_pnl_usdt||0).toFixed(6)+'</span>';let a=[['Triangles',s.triangles],['Symbols',s.symbols],['Streams',s.market_streams],['Depth updates',s.depth_updates],['Scans',s.scans],['Opportunities',s.opportunities],['Executions',s.executions],['Errors',s.execution_errors],['Risk blocks',s.risk_blocks],['Min-notional blocks',s.min_notional_blocks],['Reconnects',s.reconnects],['Filled ledger',s.ledger_filled]];document.getElementById('c').innerHTML=a.map(x=>'<div class=card><span class=muted>'+x[0]+'</span><div class=v>'+x[1]+'</div></div>').join('');document.getElementById('f').innerHTML=(s.recent||[]).slice().reverse().map(e=>'<div class=row><span class=muted>'+new Date(e.ts*1000).toLocaleTimeString()+'</span> <b>'+e.kind+'</b> '+e.message+(e.path?' <span class=mono>'+e.path.join(' → ')+'</span>':'')+(e.net_bps!=null?' <b>'+Number(e.net_bps).toFixed(3)+' bps</b>':'')).join('')||'<span class=muted>Waiting...</span>'}catch(e){document.getElementById('s').innerHTML='<b class=bad>Dashboard error</b>'}}tick();setInterval(tick,2000)</script>'''
-
-
-def _symbol_meta(info):
-    return {s["symbol"]: (s["baseAsset"], s["quoteAsset"]) for s in info.get("symbols", []) if s.get("status") == "TRADING"}
-
-
-def make_filters(info):
+def _filters(exchange_info):
     out = {}
-    for s in info.get("symbols", []):
-        if s.get("status") != "TRADING":
+    for row in exchange_info.get("symbols", []):
+        if row.get("status") != "TRADING":
             continue
-        fs = {f["filterType"]: f for f in s.get("filters", [])}
-        lot = fs.get("LOT_SIZE", {})
-        market_lot = fs.get("MARKET_LOT_SIZE", {})
-        notional = fs.get("NOTIONAL", fs.get("MIN_NOTIONAL", {}))
-        price = fs.get("PRICE_FILTER", {})
-        out[s["symbol"]] = {
-            "baseAsset": s["baseAsset"], "quoteAsset": s["quoteAsset"],
-            "stepSize": market_lot.get("stepSize", lot.get("stepSize", "0.00000001")),
-            "minQty": market_lot.get("minQty", lot.get("minQty", "0")),
-            "maxQty": market_lot.get("maxQty", lot.get("maxQty", "0")),
+        f = {x.get("filterType"): x for x in row.get("filters", [])}
+        lot = f.get("LOT_SIZE", {})
+        market_lot = f.get("MARKET_LOT_SIZE", {})
+        notional = f.get("NOTIONAL") or f.get("MIN_NOTIONAL", {})
+        out[row["symbol"]] = {
+            "baseAsset": row["baseAsset"], "quoteAsset": row["quoteAsset"],
+            "stepSize": market_lot.get("stepSize") or lot.get("stepSize", "0"),
+            "minQty": market_lot.get("minQty") or lot.get("minQty", "0"),
+            "maxQty": market_lot.get("maxQty") or lot.get("maxQty", "0"),
             "minNotional": notional.get("minNotional", "0"),
             "maxNotional": notional.get("maxNotional", "0"),
-            "applyMinToMarket": notional.get("applyMinToMarket", True),
-            "applyMaxToMarket": notional.get("applyMaxToMarket", True),
-            "minPrice": price.get("minPrice", "0"),
-            "maxPrice": price.get("maxPrice", "0"),
-            "tickSize": price.get("tickSize", "0"),
         }
     return out
 
 
-def _depth_payload(msg, levels):
-    d = msg.get("data", msg)
-    if "s" not in d:
-        return None
-    bids = [(p, q) for p, q in d.get("b", [])[:levels] if Decimal(str(p)) > 0 and Decimal(str(q)) > 0]
-    asks = [(p, q) for p, q in d.get("a", [])[:levels] if Decimal(str(p)) > 0 and Decimal(str(q)) > 0]
-    if not bids or not asks:
-        return None
-    return d["s"], {"bids": bids, "asks": asks, "depth_ts": time.monotonic() * 1000}
+def _top_symbols(rows, cap):
+    ranked = []
+    for row in rows:
+        if str(row.get("symbol", "")).endswith("USDT") and row.get("symbol", "") not in {"USDCUSDT", "BUSDUSDT"}:
+            try:
+                ranked.append((Decimal(str(row.get("quoteVolume", "0"))), row["symbol"]))
+            except Exception:
+                pass
+    ranked.sort(reverse=True)
+    return [s for _, s in ranked[: max(30, int(cap))]]
 
 
-def _sync_ledger():
-    if LEDGER is None:
-        return
-    summary = LEDGER.summary()
-    with LOCK:
-        STATE["ledger_filled"] = summary["filled"]
-        STATE["realized_pnl_usdt"] = summary["realized_pnl_usdt"]
+def _score(net_bps):
+    # Workbook gate is 40/100. The core score is transparent: 40 at the
+    # 3-bps net floor, increasing one point per additional net bps, capped 100.
+    return max(0.0, min(100.0, 40.0 + float(net_bps) - 3.0))
 
 
-def _ticker_volumes(client):
+def _tier(score):
+    if score >= 90: return "S"
+    if score >= 85: return "A+"
+    if score >= 80: return "A"
+    if score >= 70: return "B+"
+    if score >= 60: return "B"
+    if score >= 40: return "C"
+    return "D"
+
+
+async def _run(cfg: Config):
+    client = BinanceClient(cfg.api_base, __import__("os").getenv("BINANCE_API_KEY", ""), __import__("os").getenv("BINANCE_API_SECRET", ""))
+    telemetry = Telemetry()
+    risk = RiskState()
+    ledger = Ledger(cfg.ledger_path)
+    start_health_server(int(__import__("os").getenv("PORT", "10000")))
     try:
-        rows = client.ticker_24hr()
-        return {r.get("symbol"): Decimal(str(r.get("quoteVolume", "0"))) for r in rows if r.get("symbol")}
-    except Exception as exc:
-        event("UNIVERSE", f"24h ticker ranking unavailable; using exchange order: {exc}")
-        return {}
-
-
-def _select_stream_universe(triangles, volumes, cap):
-    if not triangles:
-        return [], []
-    if int(cap) <= 0:
-        symbols = sorted({s for triangle in triangles for s in triangle.symbols})
-        return list(triangles), symbols
-    cap = max(3, int(cap))
-    ranked = sorted(triangles, key=lambda t: sum((volumes.get(s, Decimal("0")) for s in t.symbols), Decimal("0")), reverse=True)
-    selected_symbols, selected_triangles = set(), []
-    for triangle in ranked:
-        additions = set(triangle.symbols) - selected_symbols
-        if len(selected_symbols) + len(additions) > cap:
-            continue
-        selected_symbols.update(triangle.symbols)
-        selected_triangles.append(triangle)
-        if len(selected_symbols) >= cap:
-            break
-    if not selected_triangles:
-        selected_triangles = [ranked[0]]
-        selected_symbols = set(ranked[0].symbols)
-    return selected_triangles, sorted(selected_symbols)
-
-
-async def _refresh_balance(client):
-    account = await asyncio.to_thread(client.account)
-    free = next((Decimal(str(x.get("free", "0"))) for x in account.get("balances", []) if x.get("asset") == "USDT"), Decimal("0"))
-    with LOCK:
-        STATE["free_usdt"] = str(free)
-        STATE["balance_refreshes"] += 1
-    return free
-
-
-async def stream_loop(cfg, client, filters, triangles, symbols, symbol_meta):
-    books, dirty = {}, set()
-    by_symbol = {}
-    for i, t in enumerate(triangles):
-        for s in t.symbols:
-            by_symbol.setdefault(s, []).append(i)
-    reconnect_delay = 1
-    last_order_ms = 0.0
-    last_balance_ms = time.monotonic() * 1000
-    free_usdt = Decimal("0")
-    balance_ok = True
-    failures = 0
-
-    while True:
-        try:
-            async with websockets.connect(cfg.ws_base, ping_interval=20, ping_timeout=10, close_timeout=5, max_size=2**23) as ws:
-                with LOCK:
-                    STATE["ws_connected"] = True
-                    STATE["status"] = "running"
-                    STATE["market_streams"] = len(symbols)
-                event("WS", f"Binance market WebSocket connected; streams={len(symbols)}")
-                params = [f"{s.lower()}@depth{cfg.depth_levels}@100ms" for s in symbols]
-                for i in range(0, len(params), 180):
-                    request_id = i // 180 + 1
-                    await ws.send(json.dumps({"method": "SUBSCRIBE", "params": params[i:i + 180], "id": request_id}))
-                event("WS", f"Market subscriptions requested; count={len(params)} batches={(len(params) + 179) // 180}")
-                reconnect_delay = 1
-
-                while True:
-                    msg = json.loads(await ws.recv())
-                    if "id" in msg and msg.get("result") is None:
-                        with LOCK:
-                            STATE["subscription_acks"] += 1
-                        continue
-                    d = _depth_payload(msg, cfg.depth_levels)
-                    if not d:
-                        continue
-                    s, dv = d
-                    books.setdefault(s, {}).update(dv)
-                    dirty.update(by_symbol.get(s, ()))
-                    with LOCK:
-                        STATE["depth_updates"] += 1
-                    if not dirty:
-                        continue
-                    now = time.monotonic() * 1000
-                    candidates = list(dirty)
-                    dirty.clear()
-                    with LOCK:
-                        STATE["scans"] += len(candidates)
-
-                    if now - last_balance_ms >= 10000:
-                        try:
-                            free_usdt = await _refresh_balance(client)
-                            last_balance_ms = now
-                            balance_ok = True
-                        except Exception as exc:
-                            balance_ok = False
-                            event("BALANCE_ERROR", f"balance refresh failed; trading paused until restored: {exc}")
-                            last_balance_ms = now
-                    if not balance_ok:
-                        continue
-                    budget = risk_budget(
-                        free_usdt,
-                        cfg.risk_pct,
-                        cfg.max_notional_usdt,
-                        Decimal(str(cfg.min_trade_notional_usdt)),
-                        capital_allocation_pct=cfg.capital_allocation_pct,
-                        safety_reserve_usdt=Decimal(str(cfg.safety_reserve_usdt)),
-                    )
-                    if budget <= 0:
-                        with LOCK:
-                            STATE["min_notional_blocks"] += 1
-                        continue
-                    for idx in candidates:
-                        t = triangles[idx]
-                        if not all(s in books and now - books[s].get("depth_ts", 0) <= cfg.stale_ms for s in t.symbols):
-                            continue
-                        result = evaluate_triangle(t, books, cfg.fee_bps, cfg.max_slippage_bps, symbol_meta, budget)
-                        if not result:
-                            continue
-                        net_bps, gross_bps, path, first, second = result
-                        if net_bps < Decimal(str(cfg.min_net_edge_bps)):
-                            continue
-                        with LOCK:
-                            STATE["opportunities"] += 1
-                            STATE["last_opportunity"] = time.time()
-                        event("OPPORTUNITY", f"net={net_bps:.3f} gross={gross_bps:.3f}", path=path, net_bps=float(net_bps), gross_bps=float(gross_bps))
-                        now_ms = time.monotonic() * 1000
-                        if not (cfg.live_trading and not cfg.dry_run) or now_ms - last_order_ms < cfg.cooldown_ms:
-                            continue
-                        if not approved(net_bps, cfg.min_net_edge_bps, budget, cfg.max_notional_usdt, min_trade_notional=Decimal(str(cfg.min_trade_notional_usdt))):
-                            with LOCK:
-                                STATE["risk_blocks"] += 1
-                            event("RISK", "Trade blocked by risk/notional gate", path=path)
-                            continue
-                        last_order_ms = now_ms
-                        try:
-                            event("LIVE", "Three-leg execution requested", path=path, net_bps=float(net_bps), budget=str(budget))
-                            execution = await asyncio.to_thread(execute_triangle, client, path, "USDT", first, budget, filters, False)
-                            if not execution.get("finished") or execution.get("final_asset") != "USDT":
-                                raise RuntimeError("execution returned without a completed USDT cycle")
-                            LEDGER.record(path, budget, execution)
-                            with LOCK:
-                                STATE["executions"] += 1
-                                STATE["last_execution"] = time.time()
-                            _sync_ledger()
-                            failures = 0
-                            event("FILLED", f"Triangle fully filled; realized={execution['realized_pnl_usdt']} USDT", path=path)
-                            try:
-                                free_usdt = await _refresh_balance(client)
-                                last_balance_ms = time.monotonic() * 1000
-                                balance_ok = True
-                            except Exception as exc:
-                                balance_ok = False
-                                event("BALANCE_ERROR", f"post-trade balance reconciliation failed: {exc}")
-                        except Exception as exc:
-                            failures += 1
-                            with LOCK:
-                                STATE["execution_errors"] += 1
-                                STATE["last_error"] = str(exc)
-                            if LEDGER is not None:
-                                LEDGER.record(path, budget, error=exc)
-                            event("ERROR", str(exc), path=path)
-                            if failures >= 3:
-                                raise RuntimeError("three consecutive execution failures; engine stopped for safety") from exc
-        except Exception as exc:
-            with LOCK:
-                STATE["ws_connected"] = False
-                STATE["status"] = "degraded"
-                STATE["reconnects"] += 1
-                STATE["last_error"] = str(exc)
-            event("WS_ERROR", str(exc))
-            await asyncio.sleep(reconnect_delay)
-            reconnect_delay = min(reconnect_delay * 2, 15)
-
-
-async def run():
-    cfg = Config.from_env()
-    cfg.validate()
-    start_health_server()
-    with LOCK:
-        STATE["started_at"] = time.time()
-        STATE["live"] = cfg.live_trading
-        STATE["dry_run"] = cfg.dry_run
-        STATE["status"] = "starting"
-    LEDGER = globals().get("LEDGER")
-    if LEDGER is None:
-        globals()["LEDGER"] = Ledger()
-    api_key = os.getenv("BINANCE_API_KEY", "").strip()
-    api_secret = os.getenv("BINANCE_API_SECRET", "").strip()
-    client = BinanceClient(cfg.api_base, api_key, api_secret)
-    try:
-        client.sync_time()
-        event("TIME", f"Binance server time synchronized; offset_ms={client.time_offset_ms}")
+        exchange_info = client.exchange_info()
+        filters = _filters(exchange_info)
+        ticker = client.ticker_24hr()
+        symbols = _top_symbols(ticker, int(__import__("os").getenv("MAX_WS_SYMBOLS", "300")))
+        triangles = build_triangles(exchange_info, cfg.max_triangles)
+        # Subscribe only to symbols that participate in the discovered triangles.
+        needed = sorted({s for t in triangles for s in t.symbols if s in filters})
+        if len(needed) > int(__import__("os").getenv("MAX_WS_SYMBOLS", "300")):
+            rank = {s: i for i, s in enumerate(symbols)}
+            needed.sort(key=lambda s: rank.get(s, 10**9))
+            needed = needed[: int(__import__("os").getenv("MAX_WS_SYMBOLS", "300"))]
+        selected = set(needed)
+        triangles = [t for t in triangles if all(s in selected for s in t.symbols)]
+        md = MarketData(cfg.ws_base, needed, cfg.depth_levels, cfg.stale_ms)
+        _state(symbols=len(needed), triangles=len(triangles), ws_total_shards=1, ws_health="connecting", health="starting", dry_run=cfg.dry_run, live=cfg.live_trading and not cfg.dry_run)
+        ws_task = asyncio.create_task(md.run())
+        last_balance = Decimal("9")
         if cfg.live_trading and not cfg.dry_run:
-            if not api_key or not api_secret:
-                raise RuntimeError("LIVE_TRADING requires BINANCE_API_KEY and BINANCE_API_SECRET")
-            account = client.account()
-            with LOCK:
-                STATE["binance_authenticated"] = True
-                STATE["free_usdt"] = next((x.get("free", "0") for x in account.get("balances", []) if x.get("asset") == "USDT"), "0")
-            event("AUTH", "Binance API authenticated successfully", usdt_free=STATE["free_usdt"])
-        else:
-            event("SAFE", "Live execution disabled")
-        info = client.exchange_info()
-        filters = make_filters(info)
-        symbol_meta = _symbol_meta(info)
-        triangles = build_triangles(info, cfg.max_triangles)
-        event("TRIANGLES", f"Candidate triangle graph built: {len(triangles)}")
-        volumes = _ticker_volumes(client)
-        triangles, symbols = _select_stream_universe(triangles, volumes, int(os.getenv("STREAM_SYMBOL_CAP", "0")))
-        with LOCK:
-            STATE["triangles"] = len(triangles)
-            STATE["symbols"] = len(symbols)
-            STATE["market_streams"] = len(symbols)
-        event("UNIVERSE", f"Liquid stream universe selected: triangles={len(triangles)} symbols={len(symbols)}")
-        event("START", f"Dragon engine ready; live={cfg.live_trading and not cfg.dry_run}")
-        await stream_loop(cfg, client, filters, triangles, symbols, symbol_meta)
+            try:
+                account = client.account()
+                balances = {x["asset"]: Decimal(str(x.get("free", "0"))) for x in account.get("balances", [])}
+                last_balance = balances.get("USDT", Decimal("0"))
+                _state(binance_authenticated=True)
+            except Exception as exc:
+                _state(warnings=[f"Binance authentication failed: {exc}"])
+                raise
+        risk.observe_balance(last_balance)
+        cycle = 0
+        last_trade = 0.0
+        while True:
+            cycle += 1
+            started = time.perf_counter()
+            now = time.time()
+            connected = md.connected
+            _state(ws_connected_shards=1 if connected else 0, ws_health="healthy" if connected else "reconnecting", ws_reconnects=md.reconnects, depth_updates=md.last_message_ms, scans=cycle)
+            if not connected:
+                await asyncio.sleep(0.25)
+                continue
+            budget = risk_budget(last_balance, cfg.capital_allocation_pct, cfg.max_notional_usdt, Decimal(str(cfg.min_trade_notional_usdt)), safety_reserve_usdt=Decimal(str(cfg.safety_reserve_usdt)), risk_state=risk)
+            best = None; candidates = []
+            for tri in triangles:
+                _state(evaluation_attempts=STATE["evaluation_attempts"] + 1)
+                if not md.fresh_books(tri.symbols):
+                    telemetry.candidate(tri.symbols, status="REJECT", reason="STALE_BOOK")
+                    continue
+                result = calculate(tri.symbols, tri.assets, md.books, {s: (filters[s]["baseAsset"], filters[s]["quoteAsset"]) for s in tri.symbols}, budget, cfg.fee_bps, cfg.max_slippage_bps)
+                if result is None:
+                    telemetry.candidate(tri.symbols, status="REJECT", reason="INSUFFICIENT_DEPTH")
+                    continue
+                score = _score(result.net_bps)
+                eligible = result.net_bps >= Decimal(str(cfg.min_net_edge_bps)) and result.net_pnl_usdt >= Decimal(str(cfg.min_expected_profit_usdt)) and score >= 40 and budget >= Decimal(str(cfg.min_trade_notional_usdt))
+                reason = None if eligible else ("BELOW_NET_EDGE" if result.net_bps < Decimal(str(cfg.min_net_edge_bps)) else "RISK_LIMIT")
+                telemetry.candidate(tri.symbols, status="ACCEPT" if eligible else "REJECT", reason=reason, result=result, notional=budget)
+                item = {"path": tri.symbols, "net_bps": float(result.net_bps), "gross_bps": float(result.gross_bps), "score": score, "tier": _tier(score), "eligible": eligible, "rejection_reason": reason, "evaluation_notional": str(budget), "trade_budget": str(budget)}
+                candidates.append(item)
+                if eligible and (best is None or result.net_bps > best[0].net_bps): best = (result, tri, score)
+            candidates.sort(key=lambda x: (x["net_bps"], x["score"]), reverse=True)
+            _state(universe_top=candidates[:50], universe_qualified=sum(1 for x in candidates if x["net_bps"] >= cfg.min_net_edge_bps), universe_rejected=sum(1 for x in candidates if not x["eligible"]), universe_execution_ready=sum(1 for x in candidates if x["eligible"]), universe_selected=1 if best else 0, opportunities=len(candidates), best_net_edge_bps=candidates[0]["net_bps"] if candidates else 0.0, top_opportunities=candidates[:20], universe_cycle_ms=(time.perf_counter()-started)*1000, universe_last_cycle_at=now)
+            if best and (now - last_trade) * 1000 >= cfg.cooldown_ms:
+                result, tri, score = best
+                _state(universe_selected=1)
+                if cfg.live_trading and not cfg.dry_run:
+                    try:
+                        execute_triangle(client, tri.symbols, "USDT", tri.assets[1], budget, filters, dry_run=False)
+                        last_trade = time.time()
+                        _state(ledger_filled=STATE["ledger_filled"] + 1)
+                    except Exception as exc:
+                        telemetry.record("EXECUTION_REJECT", str(exc), path=list(tri.symbols))
+                else:
+                    telemetry.record("DRY_RUN", f"selected {tri.symbols} net={result.net_bps:.3f}bps score={score:.1f}")
+                    last_trade = time.time()
+            snap = telemetry.snapshot()
+            _state(recent=snap["recent"][-50:], controls={"kill_switch": risk.kill_switch}, health="healthy", ws_health="healthy")
+            await asyncio.sleep(max(0.05, cfg.cooldown_ms / 1000.0 if cfg.cooldown_ms else 0.30))
     finally:
         client.close()
 
 
 def main():
-    asyncio.run(run())
+    cfg = Config.from_env(); cfg.validate()
+    try:
+        asyncio.run(_run(cfg))
+    except KeyboardInterrupt:
+        _state(health="stopped")
 
 
 if __name__ == "__main__":
