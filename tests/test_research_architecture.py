@@ -15,11 +15,12 @@ from src.dragon.research_architecture import (
 from src.dragon.engine_guard import EngineHealth, build_system_health, validate_quant_inputs
 
 
-def test_measure_leg_buy_uses_depth_and_fee():
+def test_measure_leg_buy_uses_quote_budget_depth_and_fee():
     book = {"asks": [["100", "0.05"], ["101", "0.05"]], "bids": [["99", "0.1"]]}
     leg = measure_leg("AAAUSDT", "buy", Decimal("7.5"), book, Decimal("10"))
     assert leg.vwap > Decimal("100")
-    assert leg.output_base > Decimal("0")
+    assert leg.gross_output > Decimal("0")
+    assert leg.net_output < leg.gross_output
     assert leg.fee_quote == Decimal("0.0075")
     assert leg.slippage_bps > Decimal("0")
 
