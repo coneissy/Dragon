@@ -108,8 +108,9 @@ async def run():
                     except (KeyError, ValueError, ArithmeticError):
                         continue
 
-                # First calculate the real directional basis net of fees and
-                # execution slippage. Then apply the funding buffer separately.
+                # Calculate directional basis after fees and execution slippage
+                # without prematurely filtering on the final threshold. The
+                # funding buffer is then applied as a separate conservative haircut.
                 raw_opportunities = evaluate_basis(rows, fee_bps, Decimal("-1000000"), slippage_bps)
                 opportunities = []
                 for symbol, raw_edge, direction in raw_opportunities:
