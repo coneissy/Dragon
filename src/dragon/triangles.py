@@ -81,11 +81,19 @@ def _top_output(symbol: str, side: str, qty: Decimal, books: dict):
 
 
 def _dynamic_safety_bps(t: Triangle, books: dict, symbol_meta: dict, start: Decimal, max_safety_bps: float) -> Decimal:
+    """Return a liquidity-utilization safety haircut bounded by the configured cap.
+
+    The previous implementation used fixed 3/5/10/20 bps buckets. Those magic
+    buckets made the risk haircut jump discontinuously and could be mistaken for
+    a capital threshold. The haircut is now continuous: configured cap multiplied
+    by the worst first-level liquidity utilization across the three legs.
+    """
     cap = Decimal(str(max(0.0, max_safety_bps)))
     if cap <= 0:
         return Decimal("0")
+
     amount = start
-    ratios = []
+    worst = Decimal("0")
     for i, symbol in enumerate(t.symbols):
         meta = symbol_meta.get(symbol)
         if not meta:
@@ -99,6 +107,7 @@ def _dynamic_safety_bps(t: Triangle, books: dict, symbol_meta: dict, start: Deci
             side = "sell"
         else:
             return cap
+
         levels = books.get(symbol, {}).get("bids" if side == "sell" else "asks") or []
         if not levels:
             return cap
@@ -106,22 +115,17 @@ def _dynamic_safety_bps(t: Triangle, books: dict, symbol_meta: dict, start: Deci
         qty = Decimal(str(levels[0][1]))
         if price <= 0 or qty <= 0:
             return cap
+
         input_liquidity = qty * price if side == "buy" else qty
-        ratios.append(amount / input_liquidity if input_liquidity > 0 else Decimal("999"))
+        utilization = amount / input_liquidity if input_liquidity > 0 else Decimal("1")
+        worst = max(worst, utilization)
         out = _walk(symbol, side, amount, books)
         if out is None:
             return cap
         amount = out
-    worst = max(ratios, default=Decimal("999"))
-    if worst <= Decimal("0.25"):
-        selected = Decimal("3")
-    elif worst <= Decimal("0.75"):
-        selected = Decimal("5")
-    elif worst <= Decimal("1.5"):
-        selected = Decimal("10")
-    else:
-        selected = Decimal("20")
-    return min(cap, selected)
+
+    utilization = min(Decimal("1"), max(Decimal("0"), worst))
+    return cap * utilization
 
 
 def _fee_factor(fee_bps: Decimal) -> Decimal:
@@ -139,11 +143,7 @@ def _three_leg_fee_drag_bps(fee_bps: Decimal, legs: int = 3) -> Decimal:
 
 
 def _break_even_gross_bps_from_execution(gross_final: Decimal, net_final: Decimal, start: Decimal, safety_factor: Decimal) -> Decimal:
-    """Exact break-even gross edge for the observed executable path.
-
-    Unlike a fixed fee-only formula, this preserves order-book non-linearity:
-    fees change the quantity entering later legs, which can change depth impact.
-    """
+    """Exact break-even gross edge for the observed executable path."""
     if gross_final <= 0 or net_final <= 0 or start <= 0 or safety_factor <= 0:
         return Decimal("0")
     execution_cost_multiplier = (net_final / gross_final) * safety_factor
@@ -157,8 +157,6 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
 
     Formula: start -> actual order-book depth on each leg -> one authenticated
     fee on each leg -> multiplicative execution-safety haircut -> final USDT.
-    No separate slippage haircut is applied to depth impact; the safety value
-    is an execution-risk buffer only.
     """
     symbol_meta = symbol_meta or {}
     start = Decimal(str(notional_usdt))
@@ -242,8 +240,6 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
     gross_bps = gross_pnl / start * Decimal("10000")
     net_bps = net_pnl / start * Decimal("10000")
 
-    # Exact for the observed executable depth path. This replaces the old
-    # fee-only break-even approximation that ignored depth changes caused by fees.
     break_even_gross_bps = _break_even_gross_bps_from_execution(
         gross_amount, net_amount, start, safety_factor
     )
@@ -251,7 +247,6 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
     depth_adjusted_gross_bps = gross_bps
     cost_to_break_even_bps = break_even_gross_bps - gross_bps
 
-    # Independent reconciliation values make dashboard/runtime audits explicit.
     fee_drag_actual_bps = actual_fee_total / start * Decimal("10000")
     fee_drag_equivalent_usdt = actual_fee_total
     safety_drag_bps = safety_cost / start * Decimal("10000")
