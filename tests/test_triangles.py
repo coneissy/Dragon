@@ -56,6 +56,7 @@ def test_fee_cost_scales_with_leg_count():
 
 
 def test_three_leg_fee_15_bps_is_exactly_compounded():
+    t = Triangle(("ETHUSDT", "ETHBTC", "BTCUSDT"), ("USDT", "BTC", "ETH"))
     t = Triangle(("ETHUSDT", "ETHBTC", "BTCUSDT"), ("USDT", "ETH", "BTC"))
     books = {
         "ETHUSDT": {"bids": [[100, 5]], "asks": [[100, 5]], "ts": 1},
@@ -79,9 +80,27 @@ def test_diagnostics_expose_break_even_and_fee_equivalent():
     }
     outcome = evaluate_triangle_outcome(t, books, fee_bps=15, slippage_bps=5, notional_usdt=10)
     assert outcome is not None
-    assert outcome["total_fee_equivalent"] > 0
+    assert outcome["fee_drag_equivalent_usdt"] > 0
+    assert outcome["actual_fee_total_usdt"] > 0
     assert outcome["break_even_gross_bps"] > outcome["fee_drag_bps"]
     assert outcome["cost_to_break_even_bps"] == outcome["break_even_gross_bps"] - outcome["gross_bps"]
     assert "depth_adjusted_gross_bps" in outcome
     assert len(outcome["legs"]) == 3
     assert all("depth_drag_bps" in leg and "top_price" in leg for leg in outcome["legs"])
+
+
+def test_safety_is_multiplicative_and_matches_break_even_model():
+    t = Triangle(("ETHUSDT", "ETHBTC", "BTCUSDT"), ("USDT", "ETH", "BTC"))
+    books = {
+        "ETHUSDT": {"bids": [[100, 5]], "asks": [[100, 5]], "ts": 1},
+        "ETHBTC": {"bids": [[0.01, 5]], "asks": [[0.01, 5]], "ts": 1},
+        "BTCUSDT": {"bids": [[10000, 5]], "asks": [[10000, 5]], "ts": 1},
+    }
+    outcome = evaluate_triangle_outcome(t, books, fee_bps=15, slippage_bps=5, notional_usdt=10)
+    assert outcome is not None
+    fee_factor = Decimal("1") - Decimal("15") / Decimal("10000")
+    safety_factor = Decimal("1") - outcome["safety_bps"] / Decimal("10000")
+    expected_final = outcome["post_fee_final"] * safety_factor
+    assert outcome["final_usdt"] == expected_final
+    expected_break_even = (Decimal("1") / (fee_factor ** 3 * safety_factor) - Decimal("1")) * Decimal("10000")
+    assert outcome["break_even_gross_bps"] == expected_break_even
