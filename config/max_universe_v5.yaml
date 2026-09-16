@@ -10,7 +10,7 @@ dragon:
   reserve_balance: 1.0
   tradeable_balance: 8.0
   mode: MAX_UNIVERSE
-  description: "Maximum platforms. Maximum entries. Maximum compounding. 12 observation exchanges scanning against Binance."
+  description: "Maximum platforms. Maximum entries. 12 observation exchanges scanning against Binance."
 
 exchanges:
   binance:
@@ -20,7 +20,7 @@ exchanges:
     api_required: true
     withdraw_enabled: false
     data_feed: websocket_rest
-    notes: "Sole execution venue. Spot + USDT-M perpetuals. Internal spot-futures transfer is free."
+    notes: "Sole execution venue. Spot + USDT-M perpetuals."
     fees_bps:
       spot_taker: 10
       spot_maker: 7.5
@@ -30,7 +30,6 @@ exchanges:
     trading_pairs:
       spot: [BTC/USDT, ETH/USDT, BNB/USDT, SOL/USDT, XRP/USDT, DOGE/USDT, ADA/USDT, MATIC/USDT, AVAX/USDT, LINK/USDT]
       futures: [BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT, DOGEUSDT, ADAUSDT, MATICUSDT, AVAXUSDT, LINKUSDT]
-
   kucoin: {role: OBSERVATION, spot: true, futures: false, api_required: false, withdraw_enabled: false, data_feed: websocket_rest, fees_bps: {spot_taker: 10, spot_maker: 8}}
   bybit: {role: OBSERVATION, spot: true, futures: true, api_required: false, withdraw_enabled: false, data_feed: websocket_rest, fees_bps: {spot_taker: 10, spot_maker: 7, perp_taker: 6, perp_maker: 2}}
   okx: {role: OBSERVATION, spot: true, futures: true, api_required: false, withdraw_enabled: false, data_feed: websocket_rest, fees_bps: {spot_taker: 8, spot_maker: 5, perp_taker: 5, perp_maker: 2}}
@@ -64,7 +63,7 @@ hard_gates:
   min_edge: {condition: "net_profit_bps >= 3", default: true, fatal: true}
   liquidity_check: {condition: "depth_at_best_5 >= min_depth_usd", default: true, fatal: true}
   max_position: {condition: "notional <= 95% of tradeable balance", default: true, fatal: true}
-  no_observation_trade: {condition: "cannot execute on any observation exchange (all 12)", default: true, fatal: true}
+  no_observation_trade: {condition: "observation venues are signal-only; execution remains Binance", default: true, fatal: true}
   binance_connectivity: {condition: "Binance API must be connected", default: true, fatal: true}
   spot_perp_basis_max: {condition: "basis_bps <= max_basis_bps (200)", default: true, fatal: false}
   transfer_confirmed: {condition: "spot-futures transfer confirmed before perp open", default: true, fatal: true}
@@ -101,5 +100,5 @@ opportunity_scoring:
   penalty_max: 50
   min_entry_score: 40
   multi_platform_bonus: true
-  tiers: {S: 90, A_plus: 90, A: 80, B_plus: 70, B: 70, C: 60, reject_below: 40}
+  tiers: {S: 90, A_plus: 85, A: 80, B_plus: 70, B: 60, C: 40, reject_below: 40}
   entry_sizes: {S: 95, A_plus: 90, A: 85, B_plus: 80, B: 70, C: 50}
