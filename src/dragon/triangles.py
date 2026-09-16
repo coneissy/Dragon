@@ -28,9 +28,7 @@ def build_triangles(exchange_info: dict, max_triangles: int = 5000):
     seen = set()
     unlimited = max_triangles <= 0
     for a, b in combinations(usdt_assets, 2):
-        a_usdt = markets.get((a, "USDT"))
-        b_usdt = markets.get((b, "USDT"))
-        if not a_usdt or not b_usdt:
+        if not markets.get((a, "USDT")) or not markets.get((b, "USDT")):
             continue
         for first, second in ((a, b), (b, a)):
             cross = markets.get((first, second))
@@ -74,14 +72,12 @@ def _walk(symbol: str, side: str, qty: Decimal, books: dict):
 def _top_output(symbol: str, side: str, qty: Decimal, books: dict):
     book = books.get(symbol, {})
     levels = book.get("bids" if side == "sell" else "asks") or []
-    if not levels:
+    if not levels or qty <= 0:
         return None
     price = Decimal(str(levels[0][0]))
-    if price <= 0 or qty <= 0:
+    if price <= 0:
         return None
-    if side == "sell":
-        return qty * price
-    return qty / price
+    return qty * price if side == "sell" else qty / price
 
 
 def _dynamic_safety_bps(t: Triangle, books: dict, symbol_meta: dict, start: Decimal, max_safety_bps: float) -> Decimal:
@@ -128,24 +124,54 @@ def _dynamic_safety_bps(t: Triangle, books: dict, symbol_meta: dict, start: Deci
     return min(cap, selected)
 
 
+def _fee_factor(fee_bps: Decimal) -> Decimal:
+    return Decimal("1") - fee_bps / Decimal("10000")
+
+
+def _three_leg_fee_drag_bps(fee_bps: Decimal, legs: int = 3) -> Decimal:
+    """Return the exact compounded fee drag for N legs."""
+    if legs <= 0 or fee_bps < 0:
+        return Decimal("0")
+    factor = _fee_factor(fee_bps)
+    if factor <= 0:
+        return Decimal("0")
+    return (Decimal("1") - factor ** legs) * Decimal("10000")
+
+
+def _break_even_gross_bps(fee_bps: Decimal, legs: int = 3, safety_bps: Decimal = Decimal("0")) -> Decimal:
+    """Gross edge required to cover compounded fees and safety buffer."""
+    if legs <= 0 or fee_bps < 0 or safety_bps < 0:
+        return Decimal("0")
+    fee_factor = _fee_factor(fee_bps)
+    safety_factor = Decimal("1") - safety_bps / Decimal("10000")
+    if fee_factor <= 0 or safety_factor <= 0:
+        return Decimal("0")
+    return (Decimal("1") / (fee_factor ** legs * safety_factor) - Decimal("1")) * Decimal("10000")
+
+
 def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_meta=None, notional_usdt=1.0):
-    """Evaluate a 3-leg triangular path using executable depth and compounded fees."""
+    """Evaluate a 3-leg triangle with executable depth and exactly one fee per leg.
+
+    Depth walking already captures market impact. It is therefore diagnostic only;
+    it must not be subtracted again as an extra slippage charge. The configured
+    slippage_bps value is treated only as a safety buffer.
+    """
     symbol_meta = symbol_meta or {}
     start = Decimal(str(notional_usdt))
-    if start <= 0 or len(t.symbols) != 3:
+    fee_bps = Decimal(str(fee_bps))
+    if start <= 0 or len(t.symbols) != 3 or fee_bps < 0:
         return None
 
-    fee_rate = Decimal(str(fee_bps)) / Decimal("10000")
-    fee_factor = Decimal("1") - fee_rate
-    if fee_rate < 0 or fee_factor <= 0:
+    fee_factor = _fee_factor(fee_bps)
+    if fee_factor <= 0:
         return None
 
     gross_amount = start
     net_amount = start
-    legs = []
-    total_fee_equivalent = Decimal("0")
-    total_depth_drag_bps = Decimal("0")
     top_amount = start
+    legs = []
+    total_fee_drag_bps = _three_leg_fee_drag_bps(fee_bps, len(t.symbols))
+    total_depth_drag_bps = Decimal("0")
 
     for i, symbol in enumerate(t.symbols):
         meta = symbol_meta.get(symbol)
@@ -173,12 +199,10 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
         if any(x is None or x <= 0 for x in (gross_next, net_before_fee, top_net_output)):
             return None
 
-        fee = net_before_fee * fee_rate
+        # Fee is charged exactly once on the executable output of this leg.
+        fee = net_before_fee * fee_bps / Decimal("10000")
         net_next = net_before_fee * fee_factor
-        depth_drag_bps = max(
-            Decimal("0"),
-            (Decimal("1") - net_before_fee / top_net_output) * Decimal("10000"),
-        )
+        depth_drag_bps = max(Decimal("0"), (Decimal("1") - net_before_fee / top_net_output) * Decimal("10000"))
         total_depth_drag_bps += depth_drag_bps
 
         legs.append({
@@ -190,34 +214,28 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
             "output_before_fee": str(net_before_fee),
             "output_after_fee": str(net_next),
             "fee": str(fee),
-            "fee_bps": str(Decimal(str(fee_bps))),
+            "fee_bps": str(fee_bps),
+            "fee_factor": str(fee_factor),
             "top_price": str(top_price),
             "top_output": str(top_net_output),
             "depth_drag_bps": str(depth_drag_bps),
         })
 
-        total_fee_equivalent += fee
         gross_amount = gross_next
         net_amount = net_next
         top_amount = _top_output(symbol, side_lower, top_amount, books)
         if top_amount is None or top_amount <= 0:
             return None
 
-    safety_bps = _dynamic_safety_bps(t, books, symbol_meta, start, slippage_bps)
+    safety_bps = _dynamic_safety_bps(t, books, symbol_meta, start, float(slippage_bps))
     gross_pnl = gross_amount - start
     net_pnl_before_safety = net_amount - start
     safety_cost = start * safety_bps / Decimal("10000")
     projected_final = net_amount - safety_cost
     net_pnl = projected_final - start
-
     gross_bps = gross_pnl / start * Decimal("10000")
     net_bps = net_pnl / start * Decimal("10000")
-
-    fee_drag_bps = (Decimal("1") - (fee_factor ** 3)) * Decimal("10000")
-    # Fee drag is the fraction of starting capital consumed by fees.
-    # The gross-edge break-even threshold is multiplicative: gross factor
-    # must exceed the inverse compounded fee factor.
-    break_even_gross_bps = (Decimal("1") / (fee_factor ** 3) - Decimal("1")) * Decimal("10000")
+    break_even_gross_bps = _break_even_gross_bps(fee_bps, len(t.symbols), safety_bps)
     top_of_book_gross_bps = (top_amount / start - Decimal("1")) * Decimal("10000")
 
     return {
@@ -228,10 +246,9 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
         "top_of_book_gross_bps": top_of_book_gross_bps,
         "post_fee_final": net_amount,
         "net_pnl_before_safety_usdt": net_pnl_before_safety,
-        "fee_bps_per_leg": Decimal(str(fee_bps)),
-        "fee_drag_bps": fee_drag_bps,
+        "fee_bps_per_leg": fee_bps,
+        "fee_drag_bps": total_fee_drag_bps,
         "break_even_gross_bps": break_even_gross_bps,
-        "total_fee_equivalent": total_fee_equivalent,
         "depth_drag_bps": total_depth_drag_bps,
         "safety_bps": safety_bps,
         "safety_cost_usdt": safety_cost,
