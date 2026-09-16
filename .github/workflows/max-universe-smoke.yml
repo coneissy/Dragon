@@ -2,7 +2,7 @@ name: Dragon MAX UNIVERSE smoke
 
 on:
   push:
-    branches: [max-universe-excel-v5]
+    branches: [main]
   pull_request:
     branches: [main]
 
