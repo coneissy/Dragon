@@ -24,8 +24,6 @@ async def _production_feed_worker(cfg, symbols, queue, worker_id):
         base += "/stream"
     url = base + "?streams=" + "/".join(streams)
 
-    # Keep the retry state across short-lived/flapping connections. A connection
-    # only earns a backoff reset after it has stayed healthy for this long.
     retry_attempt = 0
     base_delay = 1.0
     max_delay = 60.0
@@ -104,12 +102,7 @@ async def _production_feed_worker(cfg, symbols, queue, worker_id):
                         full_universe_runner_v3._metric("ws_non_market_messages")
                         continue
 
-                    normalized = {
-                        "s": symbol,
-                        "b": bids,
-                        "a": asks,
-                        "_source": "binance_ws_depth",
-                    }
+                    normalized = {"s": symbol, "b": bids, "a": asks, "_source": "binance_ws_depth"}
                     if not first_depth_seen:
                         first_depth_seen = True
                         web_runner.event(
@@ -141,8 +134,6 @@ async def _production_feed_worker(cfg, symbols, queue, worker_id):
                 web_runner.STATE["ws_disconnects"] = web_runner.STATE.get("ws_disconnects", 0) + 1
 
             uptime = (time.monotonic() - connected_at) if connected_at is not None else 0.0
-            # Only reset after a genuinely stable connection. This prevents a
-            # flapping socket from repeatedly reconnecting at 1 second forever.
             if uptime >= stable_reset_after:
                 retry_attempt = 0
             else:
@@ -208,6 +199,35 @@ async def run_production():
             self.path = raw_path
 
     web_runner.Handler.do_GET = robust_get
+
+    # Production diagnostics: keep the dashboard status aligned with shard health
+    # and throttle negative candidate logs so a high-volume universe cannot flood
+    # Render logs and obscure actual reconnect/execution failures.
+    original_ws_state = full_universe_runner_v3._ws_state
+    def monitored_ws_state(worker_id, **values):
+        original_ws_state(worker_id, **values)
+        with web_runner.LOCK:
+            health = web_runner.STATE.get("ws_health", "disconnected")
+            current = web_runner.STATE.get("status", "starting")
+            if health == "healthy":
+                web_runner.STATE["status"] = "running"
+            elif health in ("degraded", "disconnected") and current not in ("starting", "stopped"):
+                web_runner.STATE["status"] = "degraded"
+
+    full_universe_runner_v3._ws_state = monitored_ws_state
+    original_event = web_runner.event
+    candidate_log_counter = {"n": 0}
+    def monitored_event(kind, message, **data):
+        if kind == "CANDIDATE":
+            candidate_log_counter["n"] += 1
+            net = float(data.get("net_bps", -999999))
+            gate = str(data.get("rejection_reason", ""))
+            # Always retain actionable candidates; sample rejected noise.
+            if net < 0 and candidate_log_counter["n"] % 100 != 0 and gate not in ("PASS", ""):
+                return
+        return original_event(kind, message, **data)
+
+    web_runner.event = monitored_event
     web_runner.start_health_server()
     print(
         f"DRAGON HTTP | dashboard listening on 0.0.0.0:{os.environ['PORT']} routes=/,/dashboard,/health,/healthz",
