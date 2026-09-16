@@ -8,7 +8,7 @@ from decimal import Decimal, ROUND_DOWN
 
 from src.dragon.binance import BinanceClient
 from src.dragon.control import analysis_allowed, trading_allowed
-from src.dragon.futures import BasisHedgeEngine, FuturesClient, FuturesError, evaluate_basis
+from src.dragon.futures import FuturesClient, FuturesError, evaluate_basis
 import web_runner
 
 
@@ -44,30 +44,32 @@ def _requested_universe(ff):
 
 async def run():
     enabled = os.getenv("FUTURES_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
-    if not enabled: await asyncio.Event().wait()
+    if not enabled:
+        await asyncio.Event().wait()
+        return
+
     live = os.getenv("FUTURES_LIVE_TRADING", "false").lower() in {"1", "true", "yes", "on"}
     key = os.getenv("BINANCE_API_KEY", "").strip(); secret = os.getenv("BINANCE_API_SECRET", "").strip()
-    if not key or not secret: raise FuturesError("FUTURES_ENABLED requires Binance credentials")
+    if live and (not key or not secret):
+        raise FuturesError("FUTURES_LIVE_TRADING requires Binance credentials")
+
     spot = BinanceClient(os.getenv("BINANCE_API_BASE", "https://api.binance.com"), key, secret)
     futures = FuturesClient(os.getenv("BINANCE_FUTURES_API_BASE", "https://fapi.binance.com"), key, secret)
     try:
-        await asyncio.to_thread(spot.sync_time)
         spot_info = await asyncio.to_thread(spot.exchange_info)
         fut_info = await asyncio.to_thread(futures.exchange_info)
         sf, ff = _spot_filters(spot_info), _futures_filters(fut_info); symbols = _requested_universe(ff)
         if not symbols: raise FuturesError("no tradable USDT-margined perpetual symbols configured")
         max_symbols = int(os.getenv("FUTURES_MAX_SYMBOLS", "0"))
         if max_symbols > 0: symbols = symbols[:max_symbols]
-        max_notional = Decimal(os.getenv("FUTURES_MAX_NOTIONAL_USDT", "25"))
         min_edge = Decimal(os.getenv("FUTURES_MIN_NET_EDGE_BPS", "12"))
         fee_bps = Decimal(os.getenv("FUTURES_FEE_BPS", "5"))
         funding_buffer = Decimal(os.getenv("FUTURES_FUNDING_BUFFER_BPS", "3"))
         slippage_bps = Decimal(os.getenv("FUTURES_SLIPPAGE_BPS", "1"))
-        poll_seconds = max(30.0, float(os.getenv("FUTURES_POLL_SECONDS", "30")))
-        engine = BasisHedgeEngine(futures, spot, max_notional, leverage=1, live=live)
+        poll_seconds = max(0.25, float(os.getenv("FUTURES_POLL_SECONDS", "30")))
         with web_runner.LOCK:
             web_runner.STATE["futures_enabled"] = True; web_runner.STATE["futures_live"] = live; web_runner.STATE["futures_universe"] = len(symbols)
-        web_runner.event("FUTURES", f"USDⓈ-M validator ready: universe={len(symbols)} live={live} poll={poll_seconds:.0f}s bidirectional=true paper_validation=true")
+        web_runner.event("FUTURES", f"USDⓈ-M validator ready: universe={len(symbols)} live={live} poll={poll_seconds:.2f}s bidirectional=true paper_validation=true")
         while True:
             if not analysis_allowed() or not trading_allowed("futures"):
                 await asyncio.sleep(2); continue
@@ -88,7 +90,7 @@ async def run():
                             "symbol": symbol,
                             "spotBid": st["bidPrice"], "spotAsk": st["askPrice"],
                             "futuresBid": ft["bidPrice"], "futuresAsk": ft["askPrice"],
-                            "fundingBps": str(funding),
+                            "fundingBps": str(funding + funding_buffer),
                         })
                     except (KeyError, ValueError, ArithmeticError):
                         continue
@@ -97,12 +99,8 @@ async def run():
                     row = next((r for r in rows if r["symbol"] == symbol), None)
                     if not row: continue
                     web_runner.event("FUTURES_OPPORTUNITY", f"{symbol} direction={direction} net={edge:.3f}bps funding={Decimal(str(row['fundingBps'])):.3f}bps live={live} execution=SIMULATED")
-                    # Futures validation is paper-only. Do not submit leveraged
-                    # orders from this validator. Keep the existing execution
-                    # primitive isolated for separately reviewed production use.
-                    if not live:
-                        continue
-                    web_runner.event("FUTURES_BLOCKED", f"{symbol} live execution intentionally disabled by validator; positive edge={edge:.3f}bps direction={direction}")
+                    if live:
+                        web_runner.event("FUTURES_BLOCKED", f"{symbol} live execution intentionally disabled by validator; positive edge={edge:.3f}bps direction={direction}")
                 with web_runner.LOCK:
                     web_runner.STATE["futures_scans"] += 1
                     web_runner.STATE["futures_opportunities"] += len(opportunities)
