@@ -60,26 +60,23 @@ def main():
     from src.dragon.triangles import evaluate_triangle_outcome
 
     async def repaired_feed_worker(cfg, symbols, queue, worker_id):
-        """Use Binance raw /ws + one SUBSCRIBE request instead of long combined URLs.
-
-        This keeps the full 100-symbol shard while making the subscription explicit,
-        observable, and independent of combined-stream URL construction.
-        """
+        """Consume Binance partial-depth snapshots through a combined market-data stream."""
         streams = [f"{s.lower()}@depth{cfg.depth_levels}@100ms" for s in symbols]
         if not streams:
             return
         base = cfg.ws_base.rstrip("/")
-        if base.endswith("/stream"):
-            base = base[:-7]
-        if not base.endswith("/ws"):
-            base += "/ws"
+        if base.endswith("/ws"):
+            base = base[:-3]
+        if not base.endswith("/stream"):
+            base += "/stream"
+        url = base + "?streams=" + "/".join(streams)
         delay = 1.0
-        subscription_id = worker_id
+        raw_connect = websockets.connect
         while True:
             try:
                 full_universe_runner_v3._ws_state(worker_id, status="connecting")
-                async with websockets.connect(
-                    base,
+                async with raw_connect(
+                    url,
                     ping_interval=20,
                     ping_timeout=20,
                     close_timeout=5,
@@ -89,17 +86,16 @@ def main():
                     compression=None,
                 ) as ws:
                     delay = 1.0
-                    params = {"method": "SUBSCRIBE", "params": streams, "id": subscription_id}
-                    await ws.send(json.dumps(params, separators=(",", ":")))
                     full_universe_runner_v3._ws_state(worker_id, status="connected")
                     web_runner.event(
                         "WS",
-                        f"Spot shard {worker_id} connected; raw /ws subscription sent",
+                        f"Spot shard {worker_id} connected; combined partial-depth stream active",
                         symbols=len(symbols),
                         streams=len(streams),
-                        endpoint="/ws",
+                        endpoint=url.split("?", 1)[0],
                     )
                     last_message = time.monotonic()
+                    first_depth_seen = False
                     while True:
                         try:
                             raw = await asyncio.wait_for(ws.recv(), timeout=10.0)
@@ -109,9 +105,46 @@ def main():
                             ) from exc
                         last_message = time.monotonic()
                         full_universe_runner_v3._metric("ws_raw_messages")
+                        try:
+                            payload = json.loads(raw) if isinstance(raw, (str, bytes, bytearray)) else raw
+                        except Exception:
+                            full_universe_runner_v3._metric("ws_invalid_messages")
+                            continue
+                        if isinstance(payload, dict) and "result" in payload and "id" in payload:
+                            web_runner.event(
+                                "WS_ACK",
+                                f"Spot shard {worker_id} market stream control response",
+                                shard=worker_id,
+                                result=payload.get("result"),
+                                request_id=payload.get("id"),
+                            )
+                            continue
+                        if isinstance(payload, dict):
+                            envelope = payload.get("data", payload)
+                            stream_name = str(payload.get("stream", ""))
+                            if isinstance(envelope, dict) and not envelope.get("s") and stream_name:
+                                symbol = stream_name.split("@", 1)[0].upper()
+                                bids = envelope.get("bids", envelope.get("b", []))
+                                asks = envelope.get("asks", envelope.get("a", []))
+                                payload = dict(payload)
+                                payload["data"] = dict(envelope)
+                                payload["data"]["s"] = symbol
+                                payload["data"]["b"] = bids
+                                payload["data"]["a"] = asks
+                                raw = json.dumps(payload, separators=(",", ":"))
                         data = full_universe_runner_v3._parse_depth(raw, cfg.depth_levels)
                         if not data:
                             continue
+                        if not first_depth_seen:
+                            first_depth_seen = True
+                            web_runner.event(
+                                "WS_DEPTH",
+                                f"Spot shard {worker_id} first valid partial-depth snapshot",
+                                shard=worker_id,
+                                symbol=data.get("s"),
+                                bids=len(data.get("b", [])),
+                                asks=len(data.get("a", [])),
+                            )
                         with web_runner.LOCK:
                             web_runner.STATE["last_ws_depth_update"] = time.time()
                             web_runner.STATE["market_data_updates"] = web_runner.STATE.get("market_data_updates", 0) + 1
@@ -136,8 +169,6 @@ def main():
                 delay = min(60.0, delay * 2.0)
                 full_universe_runner_v3._metric("ws_reconnects")
 
-    # Replace only the market-data transport. Scanner, pricing, risk gates,
-    # executor and dashboard remain unchanged.
     full_universe_runner_v3._feed_worker = repaired_feed_worker
     dragon_main.stream_loop = full_universe_runner_v3.full_universe_stream_loop
 
