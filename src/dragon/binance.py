@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import os
 import time
+from decimal import Decimal
 from urllib.parse import urlencode
 
 import httpx
@@ -25,6 +26,9 @@ class BinanceClient:
         self._time_sync_interval = float(os.getenv("BINANCE_TIME_SYNC_SECONDS", "30"))
         self.recv_window_ms = int(os.getenv("BINANCE_RECV_WINDOW_MS", "5000"))
         self.recv_window_ms = max(1000, min(60000, self.recv_window_ms))
+        self._trade_fee_cache = None
+        self._trade_fee_cache_at = 0.0
+        self._trade_fee_cache_seconds = max(5.0, float(os.getenv("FEE_REFRESH_SECONDS", "60")))
         self._validate_credentials()
         self.http = httpx.Client(
             timeout=timeout,
@@ -33,7 +37,6 @@ class BinanceClient:
 
     @staticmethod
     def _normalize_credential(value: str) -> str:
-        """Normalize Render/env-var pasted credentials without ever logging their values."""
         value = (value or "").strip()
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
             value = value[1:-1].strip()
@@ -43,7 +46,6 @@ class BinanceClient:
     def _credential_encoding_error(name: str, value: str) -> BinanceError:
         bad = [(i, f"U+{ord(ch):04X}") for i, ch in enumerate(value) if ord(ch) > 127]
         positions = ", ".join(f"{i}:{code}" for i, code in bad[:8])
-        suffix = "" if len(bad) <= 8 else f" (+{len(bad) - 8} more)"
         return BinanceError(
             f"{name} contains non-ASCII characters; length={len(value)}, "
             f"invalid_positions=[{positions}]. Replace it with the raw Binance credential."
@@ -60,7 +62,6 @@ class BinanceClient:
                 self.secret.encode("ascii")
             except UnicodeEncodeError as exc:
                 raise self._credential_encoding_error("BINANCE_API_SECRET", self.secret) from exc
-
         if os.getenv("DRAGON_CRED_DIAGNOSTIC", "").strip().lower() in {"1", "true", "yes", "on"}:
             print(
                 "CREDENTIAL DIAGNOSTIC | "
@@ -119,28 +120,20 @@ class BinanceClient:
         return self.public("/api/v3/ticker/24hr")
 
     def book_ticker(self):
-        """Return current best bid/ask for all Spot symbols in one public call."""
         return self.public("/api/v3/ticker/bookTicker")
 
     def signed(self, method: str, path: str, params=None):
         if not self.key or not self.secret:
             raise BinanceError("Binance credentials missing")
-
         method = method.upper()
         self._ensure_time_sync()
         p = {k: v for k, v in (params or {}).items() if v is not None}
         p["timestamp"] = int(time.time() * 1000) + self.time_offset_ms
         p["recvWindow"] = p.get("recvWindow", self.recv_window_ms)
         query = urlencode(p, doseq=True)
-        signature = hmac.new(
-            self.secret.encode("ascii"), query.encode("utf-8"), hashlib.sha256
-        ).hexdigest()
+        signature = hmac.new(self.secret.encode("ascii"), query.encode("utf-8"), hashlib.sha256).hexdigest()
         wire = f"{query}&signature={signature}"
-        headers = {
-            "X-MBX-APIKEY": self.key,
-            "Content-Type": "application/x-www-form-urlencoded",
-        }
-
+        headers = {"X-MBX-APIKEY": self.key, "Content-Type": "application/x-www-form-urlencoded"}
         try:
             if method == "GET":
                 for attempt in range(4):
@@ -164,20 +157,14 @@ class BinanceClient:
                 message = payload.get("msg", r.text[:500])
             except ValueError:
                 message = r.text[:500]
-
             if code == -1021 and method == "GET":
                 self.sync_time()
                 p["timestamp"] = int(time.time() * 1000) + self.time_offset_ms
                 p["recvWindow"] = self.recv_window_ms
                 query = urlencode(p, doseq=True)
-                signature = hmac.new(
-                    self.secret.encode("ascii"), query.encode("utf-8"), hashlib.sha256
-                ).hexdigest()
+                signature = hmac.new(self.secret.encode("ascii"), query.encode("utf-8"), hashlib.sha256).hexdigest()
                 try:
-                    retry = self.http.get(
-                        self.base + path + "?" + query + "&signature=" + signature,
-                        headers=headers,
-                    )
+                    retry = self.http.get(self.base + path + "?" + query + "&signature=" + signature, headers=headers)
                     if retry.status_code < 400:
                         return retry.json()
                     try:
@@ -189,19 +176,53 @@ class BinanceClient:
                     raise BinanceError(message, status_code=retry.status_code, code=code, response=retry.text)
                 except httpx.HTTPError as exc:
                     raise BinanceError(f"signed retry failed: {exc}") from exc
-
             raise BinanceError(message, status_code=r.status_code, code=code, response=r.text)
-
         try:
             return r.json()
         except ValueError as exc:
             raise BinanceError(f"Binance returned non-JSON response: {r.text[:500]}") from exc
 
+    def trade_fee(self):
+        """Return authenticated Spot trading fees, cached to avoid scanner API churn."""
+        now = time.monotonic()
+        if self._trade_fee_cache is not None and now - self._trade_fee_cache_at < self._trade_fee_cache_seconds:
+            return self._trade_fee_cache
+        payload = self.signed("GET", "/sapi/v1/asset/tradeFee")
+        if not isinstance(payload, list):
+            raise BinanceError("Binance tradeFee returned an unexpected payload")
+        normalized = []
+        for row in payload:
+            if not isinstance(row, dict):
+                continue
+            symbol = str(row.get("symbol", "")).upper()
+            try:
+                maker = Decimal(str(row.get("makerCommission", "0")))
+                taker = Decimal(str(row.get("takerCommission", "0")))
+            except Exception:
+                continue
+            if symbol and maker >= 0 and taker >= 0:
+                normalized.append({"symbol": symbol, "maker": maker, "taker": taker})
+        if not normalized:
+            raise BinanceError("Binance tradeFee returned no usable fee rates")
+        self._trade_fee_cache = normalized
+        self._trade_fee_cache_at = now
+        return normalized
+
     def account(self):
-        return self.signed("GET", "/api/v3/account")
+        account = self.signed("GET", "/api/v3/account")
+        # hardening.DynamicFee consumes commissionRates. Populate it from the
+        # authenticated trade-fee endpoint and use the maximum taker rate as a
+        # conservative three-leg fee when symbol-specific rates differ.
+        try:
+            rows = self.trade_fee()
+            max_taker = max((row["taker"] for row in rows), default=None)
+            if max_taker is not None:
+                account["commissionRates"] = {"maker": str(max_taker), "taker": str(max_taker)}
+        except Exception:
+            pass
+        return account
 
     def api_restrictions(self):
-        """Return Binance API-key permissions for diagnostics and startup gating."""
         return self.signed("GET", "/sapi/v1/account/apiRestrictions")
 
     def exchange_info(self):
@@ -211,12 +232,7 @@ class BinanceClient:
         return self.signed("GET", "/api/v3/order", {"symbol": symbol, "orderId": order_id})
 
     def new_market_order(self, symbol: str, side: str, *, quantity=None, quote_order_qty=None):
-        params = {
-            "symbol": symbol,
-            "side": side.upper(),
-            "type": "MARKET",
-            "newOrderRespType": "FULL",
-        }
+        params = {"symbol": symbol, "side": side.upper(), "type": "MARKET", "newOrderRespType": "FULL"}
         if quantity is not None:
             params["quantity"] = format(quantity, "f")
         elif quote_order_qty is not None:
