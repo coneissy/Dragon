@@ -87,22 +87,14 @@ def main():
                 ) as ws:
                     delay = 1.0
                     full_universe_runner_v3._ws_state(worker_id, status="connected")
-                    web_runner.event(
-                        "WS",
-                        f"Spot shard {worker_id} connected; combined partial-depth stream active",
-                        symbols=len(symbols),
-                        streams=len(streams),
-                        endpoint=url.split("?", 1)[0],
-                    )
+                    web_runner.event("WS", f"Spot shard {worker_id} connected; combined partial-depth stream active", symbols=len(symbols), streams=len(streams), endpoint=url.split("?", 1)[0])
                     last_message = time.monotonic()
                     first_depth_seen = False
                     while True:
                         try:
                             raw = await asyncio.wait_for(ws.recv(), timeout=10.0)
                         except asyncio.TimeoutError as exc:
-                            raise ConnectionError(
-                                f"market-data stream silent for {time.monotonic() - last_message:.1f}s"
-                            ) from exc
+                            raise ConnectionError(f"market-data stream silent for {time.monotonic() - last_message:.1f}s") from exc
                         last_message = time.monotonic()
                         full_universe_runner_v3._metric("ws_raw_messages")
                         try:
@@ -111,13 +103,7 @@ def main():
                             full_universe_runner_v3._metric("ws_invalid_messages")
                             continue
                         if isinstance(payload, dict) and "result" in payload and "id" in payload:
-                            web_runner.event(
-                                "WS_ACK",
-                                f"Spot shard {worker_id} market stream control response",
-                                shard=worker_id,
-                                result=payload.get("result"),
-                                request_id=payload.get("id"),
-                            )
+                            web_runner.event("WS_ACK", f"Spot shard {worker_id} market stream control response", shard=worker_id, result=payload.get("result"), request_id=payload.get("id"))
                             continue
                         if isinstance(payload, dict):
                             envelope = payload.get("data", payload)
@@ -137,14 +123,7 @@ def main():
                             continue
                         if not first_depth_seen:
                             first_depth_seen = True
-                            web_runner.event(
-                                "WS_DEPTH",
-                                f"Spot shard {worker_id} first valid partial-depth snapshot",
-                                shard=worker_id,
-                                symbol=data.get("s"),
-                                bids=len(data.get("b", [])),
-                                asks=len(data.get("a", [])),
-                            )
+                            web_runner.event("WS_DEPTH", f"Spot shard {worker_id} first valid partial-depth snapshot", shard=worker_id, symbol=data.get("s"), bids=len(data.get("b", [])), asks=len(data.get("a", [])))
                         with web_runner.LOCK:
                             web_runner.STATE["last_ws_depth_update"] = time.time()
                             web_runner.STATE["market_data_updates"] = web_runner.STATE.get("market_data_updates", 0) + 1
@@ -178,26 +157,47 @@ def main():
         with dragon_main.LOCK:
             dynamic_fee = dragon_main.STATE.get("dynamic_fee_bps")
         effective_fee = Decimal(str(dynamic_fee)) if dynamic_fee not in (None, "", 0, 0.0) else Decimal(str(fee_bps))
+
+        # Use the corrected depth-aware projection as the scanner's authoritative
+        # result. The previous implementation calculated a corrected projection
+        # for telemetry but then returned the legacy web_runner calculation,
+        # allowing the dashboard and gate to disagree with the displayed model.
         outcome = evaluate_triangle_outcome(t, books, effective_fee, slippage_bps, symbol_meta, notional_usdt)
-        if outcome:
+        if not outcome:
             with web_runner.LOCK:
-                web_runner.STATE["last_projection"] = {
-                    "ts": time.time(),
-                    "path": list(outcome["path"]),
-                    "start_usdt": str(outcome["start_usdt"]),
-                    "gross_final": str(outcome["gross_final"]),
-                    "gross_pnl_usdt": str(outcome["gross_pnl_usdt"]),
-                    "gross_bps": float(outcome["gross_bps"]),
-                    "post_fee_final": str(outcome["post_fee_final"]),
-                    "total_fee_equivalent": str(outcome["total_fee_equivalent"]),
-                    "safety_bps": float(outcome["safety_bps"]),
-                    "safety_cost_usdt": str(outcome["safety_cost_usdt"]),
-                    "final_usdt": str(outcome["final_usdt"]),
-                    "net_pnl_usdt": str(outcome["net_pnl_usdt"]),
-                    "net_bps": float(outcome["net_bps"]),
-                    "legs": outcome["legs"],
-                }
-        return original_web_evaluate(t, books, effective_fee, slippage_bps, symbol_meta, notional_usdt)
+                web_runner.STATE.setdefault("evaluation_rejections", {})
+                web_runner.STATE["evaluation_rejections"]["NO_EXECUTABLE_DEPTH"] = web_runner.STATE["evaluation_rejections"].get("NO_EXECUTABLE_DEPTH", 0) + 1
+            return None
+
+        result = (
+            outcome["net_bps"],
+            outcome["gross_bps"],
+            outcome["path"],
+            outcome["first_asset"],
+            outcome["second_asset"],
+        )
+        with web_runner.LOCK:
+            web_runner.STATE["last_projection"] = {
+                "ts": time.time(),
+                "path": list(outcome["path"]),
+                "start_usdt": str(outcome["start_usdt"]),
+                "gross_final": str(outcome["gross_final"]),
+                "gross_pnl_usdt": str(outcome["gross_pnl_usdt"]),
+                "gross_bps": float(outcome["gross_bps"]),
+                "top_of_book_gross_bps": float(outcome["top_of_book_gross_bps"]),
+                "post_fee_final": str(outcome["post_fee_final"]),
+                "net_pnl_before_safety_usdt": str(outcome["net_pnl_before_safety_usdt"]),
+                "fee_drag_bps": float(outcome["fee_drag_bps"]),
+                "total_fee_equivalent": str(outcome["total_fee_equivalent"]),
+                "depth_drag_bps": float(outcome["depth_drag_bps"]),
+                "safety_bps": float(outcome["safety_bps"]),
+                "safety_cost_usdt": str(outcome["safety_cost_usdt"]),
+                "final_usdt": str(outcome["final_usdt"]),
+                "net_pnl_usdt": str(outcome["net_pnl_usdt"]),
+                "net_bps": float(outcome["net_bps"]),
+                "legs": outcome["legs"],
+            }
+        return result
 
     web_runner.evaluate_triangle = hardened_web_evaluate
 
