@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from src.dragon.triangles import Triangle, evaluate_triangle
+from src.dragon.triangles import Triangle, evaluate_triangle, evaluate_triangle_outcome
 from src.dragon.hardening import _fee_cost_bps
 
 
@@ -53,3 +53,18 @@ def test_fee_cost_scales_with_leg_count():
     assert _fee_cost_bps(fee, 1) == fee
     assert _fee_cost_bps(fee, 2) > fee
     assert _fee_cost_bps(fee, 3) > _fee_cost_bps(fee, 2)
+
+
+def test_three_leg_fee_15_bps_is_exactly_compounded():
+    t = Triangle(("ETHUSDT", "ETHBTC", "BTCUSDT"), ("USDT", "ETH", "BTC"))
+    books = {
+        "ETHUSDT": {"bids": [[100, 5]], "asks": [[100, 5]], "ts": 1},
+        "ETHBTC": {"bids": [[0.01, 5]], "asks": [[0.01, 5]], "ts": 1},
+        "BTCUSDT": {"bids": [[10000, 5]], "asks": [[10000, 5]], "ts": 1},
+    }
+    outcome = evaluate_triangle_outcome(t, books, fee_bps=15, slippage_bps=0, notional_usdt=10)
+    assert outcome is not None
+    expected_drag = (Decimal("1") - (Decimal("1") - Decimal("15") / Decimal("10000")) ** 3) * Decimal("10000")
+    assert outcome["fee_drag_bps"] == expected_drag
+    assert Decimal("44.9") < outcome["fee_drag_bps"] < Decimal("45.0")
+    assert all(leg["fee_bps"] == "15" for leg in outcome["legs"])
