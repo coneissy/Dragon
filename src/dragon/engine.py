@@ -60,7 +60,6 @@ def main():
     from src.dragon.triangles import evaluate_triangle_outcome
 
     async def repaired_feed_worker(cfg, symbols, queue, worker_id):
-        """Consume Binance partial-depth snapshots through a combined market-data stream."""
         streams = [f"{s.lower()}@depth{cfg.depth_levels}@100ms" for s in symbols]
         if not streams:
             return
@@ -75,16 +74,7 @@ def main():
         while True:
             try:
                 full_universe_runner_v3._ws_state(worker_id, status="connecting")
-                async with raw_connect(
-                    url,
-                    ping_interval=20,
-                    ping_timeout=20,
-                    close_timeout=5,
-                    open_timeout=15,
-                    max_size=2**24,
-                    max_queue=4096,
-                    compression=None,
-                ) as ws:
+                async with raw_connect(url, ping_interval=20, ping_timeout=20, close_timeout=5, open_timeout=15, max_size=2**24, max_queue=4096, compression=None) as ws:
                     delay = 1.0
                     full_universe_runner_v3._ws_state(worker_id, status="connected")
                     web_runner.event("WS", f"Spot shard {worker_id} connected; combined partial-depth stream active", symbols=len(symbols), streams=len(streams), endpoint=url.split("?", 1)[0])
@@ -155,23 +145,13 @@ def main():
         with dragon_main.LOCK:
             dynamic_fee = dragon_main.STATE.get("dynamic_fee_bps")
         effective_fee = Decimal(str(dynamic_fee)) if dynamic_fee not in (None, "", 0, 0.0) else Decimal(str(fee_bps))
-
-        # This executable-depth projection is authoritative for the scanner.
-        # It keeps the displayed model and the execution gate on the same math.
         outcome = evaluate_triangle_outcome(t, books, effective_fee, slippage_bps, symbol_meta, notional_usdt)
         if not outcome:
             with web_runner.LOCK:
                 web_runner.STATE.setdefault("evaluation_rejections", {})
                 web_runner.STATE["evaluation_rejections"]["NO_EXECUTABLE_DEPTH"] = web_runner.STATE["evaluation_rejections"].get("NO_EXECUTABLE_DEPTH", 0) + 1
             return None
-
-        result = (
-            outcome["net_bps"],
-            outcome["gross_bps"],
-            outcome["path"],
-            outcome["first_asset"],
-            outcome["second_asset"],
-        )
+        result = (outcome["net_bps"], outcome["gross_bps"], outcome["path"], outcome["first_asset"], outcome["second_asset"])
         with web_runner.LOCK:
             diagnostics = web_runner.STATE.setdefault("calculation_diagnostics", {})
             diagnostics["evaluations"] = diagnostics.get("evaluations", 0) + 1
@@ -186,33 +166,23 @@ def main():
             diagnostics["break_even_gross_bps"] = float(outcome["break_even_gross_bps"])
             diagnostics["last_path"] = list(outcome["path"])
             web_runner.STATE["last_projection"] = {
-                "ts": time.time(),
-                "path": list(outcome["path"]),
-                "start_usdt": str(outcome["start_usdt"]),
-                "gross_final": str(outcome["gross_final"]),
-                "gross_pnl_usdt": str(outcome["gross_pnl_usdt"]),
-                "gross_bps": float(outcome["gross_bps"]),
-                "top_of_book_gross_bps": float(outcome["top_of_book_gross_bps"]),
-                "depth_adjusted_gross_bps": float(outcome["depth_adjusted_gross_bps"]),
-                "post_fee_final": str(outcome["post_fee_final"]),
-                "net_pnl_before_safety_usdt": str(outcome["net_pnl_before_safety_usdt"]),
-                "fee_bps_per_leg": float(outcome["fee_bps_per_leg"]),
-                "fee_drag_bps": float(outcome["fee_drag_bps"]),
-                "total_fee_equivalent": str(outcome["total_fee_equivalent"]),
-                "depth_drag_bps": float(outcome["depth_drag_bps"]),
-                "safety_bps": float(outcome["safety_bps"]),
-                "safety_cost_usdt": str(outcome["safety_cost_usdt"]),
-                "break_even_gross_bps": float(outcome["break_even_gross_bps"]),
-                "cost_to_break_even_bps": float(outcome["cost_to_break_even_bps"]),
-                "final_usdt": str(outcome["final_usdt"]),
-                "net_pnl_usdt": str(outcome["net_pnl_usdt"]),
-                "net_bps": float(outcome["net_bps"]),
-                "legs": outcome["legs"],
+                "ts": time.time(), "path": list(outcome["path"]), "start_usdt": str(outcome["start_usdt"]),
+                "gross_final": str(outcome["gross_final"]), "gross_pnl_usdt": str(outcome["gross_pnl_usdt"]), "gross_bps": float(outcome["gross_bps"]),
+                "top_of_book_gross_bps": float(outcome["top_of_book_gross_bps"]), "depth_adjusted_gross_bps": float(outcome["depth_adjusted_gross_bps"]),
+                "post_fee_final": str(outcome["post_fee_final"]), "net_pnl_before_safety_usdt": str(outcome["net_pnl_before_safety_usdt"]),
+                "actual_fee_total_usdt": str(outcome["actual_fee_total_usdt"]), "fee_bps_per_leg": float(outcome["fee_bps_per_leg"]),
+                "fee_drag_bps": float(outcome["fee_drag_bps"]), "fee_drag_equivalent_usdt": str(outcome["fee_drag_equivalent_usdt"]),
+                "fee_drag_actual_bps": float(outcome["fee_drag_actual_bps"]), "depth_drag_bps": float(outcome["depth_drag_bps"]),
+                "safety_bps": float(outcome["safety_bps"]), "safety_drag_bps": float(outcome["safety_drag_bps"]), "safety_cost_usdt": str(outcome["safety_cost_usdt"]),
+                "break_even_gross_bps": float(outcome["break_even_gross_bps"]), "cost_to_break_even_bps": float(outcome["cost_to_break_even_bps"]),
+                "total_cost_bps": float(outcome["total_cost_bps"]), "execution_multiplier_before_safety": float(outcome["execution_multiplier_before_safety"]),
+                "execution_multiplier_final": float(outcome["execution_multiplier_final"]), "final_usdt": str(outcome["final_usdt"]),
+                "net_pnl_usdt": str(outcome["net_pnl_usdt"]), "net_bps": float(outcome["net_bps"]),
+                "reconciliation_error_usdt": str(outcome["reconciliation_error_usdt"]), "legs": outcome["legs"],
             }
         return result
 
     web_runner.evaluate_triangle = hardened_web_evaluate
-
     original_web_execute = web_runner.execute_triangle
 
     def hardened_web_execute(client, path, start_asset, first_asset, budget, filters, dry_run):
@@ -230,10 +200,8 @@ def main():
         return original_web_execute(client, path, start_asset, first_asset, budget, filters, dry_run)
 
     web_runner.execute_triangle = hardened_web_execute
-
     install(dragon_main)
     dragon_main.DASHBOARD = DASHBOARD_HTML
-
     original_connect = websockets.connect
 
     def resilient_connect(*args, **kwargs):
@@ -243,7 +211,6 @@ def main():
         return _RateLimitedConnect(original_connect, args, kwargs)
 
     websockets.connect = resilient_connect
-
     original_get = dragon_main.Handler.do_GET
 
     def dashboard_root(self):
@@ -256,7 +223,6 @@ def main():
         return original_get(self)
 
     dragon_main.Handler.do_GET = dashboard_root
-
     original_evaluate = dragon_main.evaluate_triangle
     last_signal = {}
 
@@ -265,8 +231,6 @@ def main():
         try:
             with dragon_main.LOCK:
                 dragon_main.STATE.setdefault("rejection", {})
-                dragon_main.STATE.setdefault("rejection_total", 0)
-                dragon_main.STATE["rejection_total"] += 1
                 if result is None:
                     key = "NO_EXECUTABLE_DEPTH"
                 else:
@@ -281,7 +245,6 @@ def main():
         return result
 
     dragon_main.evaluate_triangle = instrumented_evaluate
-
     original_approved = dragon_main.approved
 
     def guarded_approved(net_bps, min_net_bps, notional, max_notional, *, min_trade_notional=None):
@@ -309,7 +272,6 @@ def main():
         return True
 
     dragon_main.approved = guarded_approved
-
     original_execute = dragon_main.execute_triangle
 
     def guarded_execute(client, path, start_asset, first_asset, budget, filters, dry_run):
@@ -344,7 +306,6 @@ def main():
         return original_execute(client, path, start_asset, first_asset, budget, filters, dry_run)
 
     dragon_main.execute_triangle = guarded_execute
-
     asyncio.run(dragon_main.run())
 
 
