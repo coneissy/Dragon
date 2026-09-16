@@ -4,6 +4,8 @@ The canonical dashboard lives at the repository root. This loader adds a
 prominent live Binance account/balance panel without duplicating the dashboard.
 """
 from pathlib import Path
+from threading import Thread
+import time
 
 
 _DASHBOARD_PATH = Path(__file__).resolve().parents[2] / "dashboard.html"
@@ -54,10 +56,42 @@ _BALANCE_PANEL = r'''
 </script>
 '''
 
-# Insert immediately below the warning area. If the marker changes, fail loudly
-# rather than silently serving a dashboard without the balance panel.
 _MARKER = '<div id="warnings"></div>'
 if _MARKER not in _HTML:
     raise RuntimeError("Dragon dashboard warnings marker not found")
 
 HTML = _HTML.replace(_MARKER, _MARKER + _BALANCE_PANEL, 1)
+
+
+# The production engine replaces the original stream loop with the full
+# universe runner. That runner publishes the authenticated Binance balance in
+# web_runner.STATE, while /health serves src.dragon.main.STATE. Bridge the
+# account telemetry so the dashboard shows the real balance instead of the
+# main-module default of 0 USDT.
+def _start_balance_state_bridge() -> None:
+    try:
+        from src.dragon import main as dragon_main
+        import web_runner
+    except Exception:
+        return
+
+    def bridge() -> None:
+        while True:
+            try:
+                with web_runner.LOCK:
+                    free = web_runner.STATE.get("free_usdt", "0")
+                    refreshes = web_runner.STATE.get("balance_refreshes", 0)
+                    authenticated = web_runner.STATE.get("binance_authenticated", False)
+                with dragon_main.LOCK:
+                    dragon_main.STATE["free_usdt"] = str(free)
+                    dragon_main.STATE["balance_refreshes"] = int(refreshes or 0)
+                    if authenticated:
+                        dragon_main.STATE["binance_authenticated"] = True
+            except Exception:
+                pass
+            time.sleep(0.5)
+
+    Thread(target=bridge, name="dragon-balance-state-bridge", daemon=True).start()
+
+
+_start_balance_state_bridge()
