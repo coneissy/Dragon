@@ -179,13 +179,12 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
         gross_next = _walk(symbol, side_lower, gross_amount, books)
         net_before_fee = _walk(symbol, side_lower, net_amount, books)
         top_net_output = _top_output(symbol, side_lower, net_amount, books)
-        top_gross_output = _top_output(symbol, side_lower, gross_amount, books)
-        if any(x is None or x <= 0 for x in (gross_next, net_before_fee, top_net_output, top_gross_output)):
+        if any(x is None or x <= 0 for x in (gross_next, net_before_fee, top_net_output)):
             return None
 
         fee = net_before_fee * (Decimal("1") - fee_factor)
         net_next = net_before_fee * fee_factor
-        depth_drag_bps = (net_before_fee / top_net_output - Decimal("1")) * Decimal("10000")
+        depth_drag_bps = max(Decimal("0"), (Decimal("1") - net_before_fee / top_net_output) * Decimal("10000"))
         total_depth_drag_bps += depth_drag_bps
         legs.append({
             "symbol": symbol,
