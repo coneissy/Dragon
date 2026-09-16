@@ -8,12 +8,7 @@ from urllib.parse import urlsplit
 
 
 async def _production_feed_worker(cfg, symbols, queue, worker_id):
-    """Stream Binance Spot partial-depth snapshots using combined market streams.
-
-    Binance partial-depth snapshots use `lastUpdateId`, `bids`, and `asks` and do not
-    include the symbol inside the payload. The combined-stream envelope carries the
-    stream name, so normalize that envelope into Dragon's existing `s/b/a` shape.
-    """
+    """Stream Binance Spot partial-depth snapshots with resilient reconnects."""
     import websockets
     import web_runner
     import full_universe_runner_v3
@@ -29,28 +24,36 @@ async def _production_feed_worker(cfg, symbols, queue, worker_id):
         base += "/stream"
     url = base + "?streams=" + "/".join(streams)
 
-    delay = 1.0
+    # Keep the retry state across short-lived/flapping connections. A connection
+    # only earns a backoff reset after it has stayed healthy for this long.
+    retry_attempt = 0
+    base_delay = 1.0
+    max_delay = 60.0
+    stable_reset_after = 30.0
+
     while True:
+        connected_at = None
         try:
             full_universe_runner_v3._ws_state(worker_id, status="connecting")
             async with websockets.connect(
                 url,
-                ping_interval=20,
-                ping_timeout=20,
+                ping_interval=15,
+                ping_timeout=30,
                 close_timeout=5,
                 open_timeout=15,
                 max_size=2**24,
                 max_queue=4096,
                 compression=None,
             ) as ws:
-                delay = 1.0
-                full_universe_runner_v3._ws_state(worker_id, status="connected")
+                connected_at = time.monotonic()
+                full_universe_runner_v3._ws_state(worker_id, status="connected", ws_next_retry_at=None)
                 web_runner.event(
                     "WS",
                     f"Spot shard {worker_id} connected; combined partial-depth stream active",
                     symbols=len(symbols),
                     streams=len(streams),
                     endpoint=base,
+                    retry_attempt=retry_attempt,
                 )
                 last_message = time.monotonic()
                 first_depth_seen = False
@@ -136,16 +139,36 @@ async def _production_feed_worker(cfg, symbols, queue, worker_id):
         except Exception as exc:
             with web_runner.LOCK:
                 web_runner.STATE["ws_disconnects"] = web_runner.STATE.get("ws_disconnects", 0) + 1
+
+            uptime = (time.monotonic() - connected_at) if connected_at is not None else 0.0
+            # Only reset after a genuinely stable connection. This prevents a
+            # flapping socket from repeatedly reconnecting at 1 second forever.
+            if uptime >= stable_reset_after:
+                retry_attempt = 0
+            else:
+                retry_attempt += 1
+
+            exponent = max(0, retry_attempt - 1)
+            raw_delay = min(max_delay, base_delay * (2 ** exponent))
+            jitter = random.uniform(0.0, min(5.0, raw_delay * 0.25))
+            wait = min(max_delay, raw_delay + jitter)
+
             full_universe_runner_v3._ws_state(
                 worker_id,
                 status="reconnecting",
                 ws_last_disconnect=time.time(),
+                ws_next_retry_at=time.time() + wait,
             )
-            web_runner.event("WS_ERROR", f"Spot shard {worker_id} disconnected: {exc}", shard=worker_id)
-            wait = min(60.0, delay + random.uniform(0, min(5.0, delay * 0.25)))
-            full_universe_runner_v3._ws_state(worker_id, ws_next_retry_at=time.time() + wait)
+            web_runner.event(
+                "WS_ERROR",
+                f"Spot shard {worker_id} disconnected: {exc}; reconnecting with backoff",
+                shard=worker_id,
+                retry_attempt=retry_attempt,
+                connection_uptime_s=round(uptime, 2),
+                retry_delay_s=round(wait, 2),
+                reset_after_s=stable_reset_after,
+            )
             await asyncio.sleep(wait)
-            delay = min(60.0, delay * 2.0)
             full_universe_runner_v3._metric("ws_reconnects")
 
 
@@ -233,9 +256,6 @@ async def run_production():
         web_runner.event("UNIVERSE", f"FULL SPOT UNIVERSE active: triangles={len(triangles)} symbols={len(symbols)}")
         web_runner.event("START", f"Dragon full-universe engine ready; live={cfg.live_trading and not cfg.dry_run}")
 
-        # full_universe_stream_loop looks up _feed_worker at runtime. Replace it
-        # here, immediately before entering the loop, so the production service
-        # cannot fall back to the older payload-incompatible worker.
         full_universe_runner_v3._feed_worker = _production_feed_worker
         await full_universe_runner_v3.full_universe_stream_loop(
             cfg, client, filters, triangles, symbols, symbol_meta
