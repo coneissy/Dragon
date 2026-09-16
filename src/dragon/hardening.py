@@ -68,20 +68,42 @@ class DynamicFee:
         self._lock = Lock()
 
     def refresh(self, client):
+        """Load the authenticated taker fee directly from Binance's fee endpoint.
+
+        Do not rely on BinanceClient.account() to expose commissionRates because
+        that method intentionally treats fee lookup as optional and may return a
+        successful account response even when the fee request failed. Direct
+        retrieval makes the failure observable and prevents stale/implicit fee
+        assumptions from entering the scanner.
+        """
         try:
-            account = client.account()
-            rates = account.get("commissionRates") or {}
-            taker = rates.get("taker")
-            if taker is not None:
-                value = Decimal(str(taker)) * Decimal("10000")
-                if value >= 0:
-                    with self._lock:
-                        self.bps = value
-                        self.updated_at = time.time()
-                        self.source = "authenticated_account"
-                        self.last_error = None
-                    return value
-            raise RuntimeError("authenticated account response contained no taker commissionRates")
+            rows = client.trade_fee()
+            if not isinstance(rows, list) or not rows:
+                raise RuntimeError("authenticated trade-fee response was empty")
+            takers = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                taker = row.get("takerCommission")
+                if taker is None:
+                    taker = row.get("taker")
+                if taker is None:
+                    continue
+                value = Decimal(str(taker))
+                # Binance returns the commission rate as a fraction, e.g. 0.001.
+                # Reject malformed or negative values rather than silently using them.
+                if value < 0 or value > Decimal("1"):
+                    continue
+                takers.append(value * Decimal("10000"))
+            if not takers:
+                raise RuntimeError("authenticated trade-fee response contained no valid taker rate")
+            value = max(takers)
+            with self._lock:
+                self.bps = value
+                self.updated_at = time.time()
+                self.source = "authenticated_trade_fee"
+                self.last_error = None
+            return value
         except Exception as exc:
             with self._lock:
                 self.last_error = str(exc)[:300]
