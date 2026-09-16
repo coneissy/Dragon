@@ -1,0 +1,105 @@
+# Dragon Cross-Exchange Arbitrage Optimizer Config
+# Version 5.0 MAX UNIVERSE | 2026-09-16
+# Binance = sole EXECUTION venue | 12 observation platforms
+# MAX ENTRY profile. Execution remains subject to Dragon's existing safety controls.
+
+dragon:
+  version: "5.0-max-universe"
+  base_currency: USDT
+  starting_balance: 9.0
+  reserve_balance: 1.0
+  tradeable_balance: 8.0
+  mode: MAX_UNIVERSE
+  description: "Maximum platforms. Maximum entries. Maximum compounding. 12 observation exchanges scanning against Binance."
+
+exchanges:
+  binance:
+    role: EXECUTION
+    spot: true
+    futures: true
+    api_required: true
+    withdraw_enabled: false
+    data_feed: websocket_rest
+    notes: "Sole execution venue. Spot + USDT-M perpetuals. Internal spot-futures transfer is free."
+    fees_bps:
+      spot_taker: 10
+      spot_maker: 7.5
+      perp_taker: 4
+      perp_maker: 2
+      spot_futures_transfer: 0
+    trading_pairs:
+      spot: [BTC/USDT, ETH/USDT, BNB/USDT, SOL/USDT, XRP/USDT, DOGE/USDT, ADA/USDT, MATIC/USDT, AVAX/USDT, LINK/USDT]
+      futures: [BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT, DOGEUSDT, ADAUSDT, MATICUSDT, AVAXUSDT, LINKUSDT]
+
+  kucoin: {role: OBSERVATION, spot: true, futures: false, api_required: false, withdraw_enabled: false, data_feed: websocket_rest, fees_bps: {spot_taker: 10, spot_maker: 8}}
+  bybit: {role: OBSERVATION, spot: true, futures: true, api_required: false, withdraw_enabled: false, data_feed: websocket_rest, fees_bps: {spot_taker: 10, spot_maker: 7, perp_taker: 6, perp_maker: 2}}
+  okx: {role: OBSERVATION, spot: true, futures: true, api_required: false, withdraw_enabled: false, data_feed: websocket_rest, fees_bps: {spot_taker: 8, spot_maker: 5, perp_taker: 5, perp_maker: 2}}
+  kraken: {role: OBSERVATION, spot: true, futures: true, api_required: false, withdraw_enabled: false, data_feed: websocket_rest, fees_bps: {spot_taker: 10, spot_maker: 8, perp_taker: 5, perp_maker: 2}}
+  gate_io: {role: OBSERVATION, spot: true, futures: true, api_required: false, withdraw_enabled: false, data_feed: websocket_rest, fees_bps: {spot_taker: 12, spot_maker: 10, perp_taker: 6, perp_maker: 3}}
+  mexc: {role: OBSERVATION, spot: true, futures: true, api_required: false, withdraw_enabled: false, data_feed: websocket_rest, fees_bps: {spot_taker: 10, spot_maker: 8, perp_taker: 6, perp_maker: 3}}
+  bitget: {role: OBSERVATION, spot: true, futures: true, api_required: false, withdraw_enabled: false, data_feed: websocket_rest, fees_bps: {spot_taker: 10, spot_maker: 7, perp_taker: 6, perp_maker: 2}}
+  htx: {role: OBSERVATION, spot: true, futures: true, api_required: false, withdraw_enabled: false, data_feed: websocket_rest, fees_bps: {spot_taker: 10, spot_maker: 8, perp_taker: 5, perp_maker: 2}}
+  bitstamp: {role: OBSERVATION, spot: true, futures: false, api_required: false, withdraw_enabled: false, data_feed: websocket_rest, fees_bps: {spot_taker: 12, spot_maker: 10}}
+  upbit: {role: OBSERVATION, spot: true, futures: false, api_required: false, withdraw_enabled: false, data_feed: websocket_rest, fees_bps: {spot_taker: 8, spot_maker: 6}}
+  bingx: {role: OBSERVATION, spot: true, futures: true, api_required: false, withdraw_enabled: false, data_feed: websocket_rest, fees_bps: {spot_taker: 10, spot_maker: 8, perp_taker: 6, perp_maker: 2}}
+  coinbase: {role: OBSERVATION, spot: true, futures: true, api_required: false, withdraw_enabled: false, data_feed: websocket_rest, fees_bps: {spot_taker: 10, spot_maker: 4, perp_taker: 5, perp_maker: 2}}
+
+trading_modes:
+  spot_triangular: {enabled: true, execution_venue: binance, allocation: 30, min_profit_spread_pct: 0.3, min_net_profit_bps: 3, max_slippage_bps: 3, latency_penalty_bps: 1, fees_bps: 30, break_even_bps: 40, min_entry_spread_bps: 41, position_pct: 95, re_entry_delay_seconds: 0}
+  spot_perp: {enabled: true, execution_venue: binance, allocation: 70, funding_rate_threshold_pct: 0.01, max_basis_bps: 200, convergence_days_max: 14, leverage: 1, auto_spot_futures_transfer: true, min_transfer_amount: 5, transfer_confirmations: 1, fees_bps: {open: 14, close: 14, round_trip: 35}, spot_futures_transfer_fee: 0, min_entry_basis_bps: 36, position_pct: 95, re_entry_delay_seconds: 0}
+  cross_exchange_signal:
+    enabled: true
+    execution_venue: binance
+    signal_sources: [kucoin, bybit, okx, kraken, gate_io, mexc, bitget, htx, bitstamp, upbit, bingx, coinbase]
+    strategy: max_entry
+  scanner_bridge:
+    enabled: true
+    mode: active
+    scan_interval_ms: 500
+    alert_threshold_bps: 15
+    exchanges: [binance, kucoin, bybit, okx, kraken, gate_io, mexc, bitget, htx, bitstamp, upbit, bingx, coinbase]
+
+hard_gates:
+  fresh_data: {condition: "book_age < stale_ms (500ms)", default: true, fatal: true}
+  min_edge: {condition: "net_profit_bps >= 3", default: true, fatal: true}
+  liquidity_check: {condition: "depth_at_best_5 >= min_depth_usd", default: true, fatal: true}
+  max_position: {condition: "notional <= 95% of tradeable balance", default: true, fatal: true}
+  no_observation_trade: {condition: "cannot execute on any observation exchange (all 12)", default: true, fatal: true}
+  binance_connectivity: {condition: "Binance API must be connected", default: true, fatal: true}
+  spot_perp_basis_max: {condition: "basis_bps <= max_basis_bps (200)", default: true, fatal: false}
+  transfer_confirmed: {condition: "spot-futures transfer confirmed before perp open", default: true, fatal: true}
+  daily_loss_limit: {condition: "REMOVED -- no daily loss limit in MAX UNIVERSE", default: false, fatal: false}
+
+risk_limits:
+  max_daily_loss_usd: 0
+  max_consecutive_losses: 5
+  max_drawdown_pct: 15
+  position_timeout_seconds: 15
+  binance_rate_limit_per_min: 1200
+  emergency_kill_switch: true
+  re_entry_delay_seconds: 0
+  trades_per_day: 0
+
+multi_platform_scoring:
+  enabled: true
+  bonuses: {single_platform: 0, two_to_three: 5, four_to_six: 10, seven_plus: 15}
+  special_patterns: {kimchi_premium_upbit: 10, gate_mexc_retail_divergence: 5, coinbase_kraken_institutional_lag: 5}
+
+compounding:
+  mode: dynamic
+  starting_balance: 9.0
+  reserve: 1.0
+  tradeable_balance: 8.0
+  position_pct: 95
+  combined_avg_net_bps: 46
+  trades_per_day: 0
+  estimated_daily_signals: "2200-4000"
+  x2_target_trades: 150
+
+opportunity_scoring:
+  weights: {edge: 0.50, liquidity: 0.30, persistence: 0.20}
+  penalty_max: 50
+  min_entry_score: 40
+  multi_platform_bonus: true
+  tiers: {S: 90, A_plus: 90, A: 80, B_plus: 70, B: 70, C: 60, reject_below: 40}
+  entry_sizes: {S: 95, A_plus: 90, A: 85, B_plus: 80, B: 70, C: 50}
