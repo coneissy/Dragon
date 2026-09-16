@@ -4,9 +4,9 @@ services:
     runtime: python
     region: frankfurt
     plan: free
-    branch: max-universe-excel-v5
+    branch: main
     buildCommand: pip install -r requirements.txt
-    startCommand: python -m src.dragon.engine
+    startCommand: python -m dragon.engine
     autoDeploy: true
     healthCheckPath: /health
     envVars:
