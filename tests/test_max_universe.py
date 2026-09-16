@@ -31,11 +31,20 @@ def test_net_edge_formula_and_position_cap():
         observing_platforms=3,
         profile=PROFILE,
     )
-    # 50 bps gross - 20 fee - 3 slippage - 1 latency = 26 bps net.
+    # Exact multiplicative economics: gross ratio 1.005, then two 10-bps
+    # fees, 3-bps slippage, and 1-bps latency penalty.
     assert result.gross_edge_bps == Decimal("50.0")
-    assert result.net_edge_bps == Decimal("26.0")
+    assert result.fee_bps == Decimal("19.99")
+    assert result.net_edge_bps == Decimal("25.89838687730150000")
+    assert result.expected_profit_usdt == Decimal("0.019682774486495140000")
     assert result.executable_notional_usdt == Decimal("7.6")
     assert result.gate == "PASS"
+
+
+def test_three_leg_fee_cost_is_compounded():
+    fee = Decimal("15")
+    expected_drag = (Decimal("1") - (Decimal("1") - fee / Decimal("10000")) ** 3) * Decimal("10000")
+    assert expected_drag == Decimal("44.93250375")
 
 
 def test_stale_data_is_fatal():
