@@ -3,9 +3,6 @@ import os
 import sqlite3
 import threading
 import time
-from decimal import Decimal
-
-from src.dragon.risk import record_max_universe_trade
 
 
 class Ledger:
@@ -37,8 +34,6 @@ class Ledger:
                 (time.time(), json.dumps(list(path)), str(start_usdt), final, pnl, status, str(error) if error else None, json.dumps(result, default=str) if result else None),
             )
             self._db.commit()
-        if status == "FILLED" and pnl is not None:
-            record_max_universe_trade(Decimal(str(pnl)))
 
     def summary(self):
         with self._lock:
