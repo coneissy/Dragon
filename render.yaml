@@ -27,43 +27,53 @@ services:
       - key: FUTURES_LIVE_TRADING
         value: "false"
       - key: FUTURES_MIN_NET_EDGE_BPS
-        value: "2"
+        value: "3"
       - key: FUTURES_FEE_BPS
-        value: "5"
+        value: "4"
       - key: FUTURES_FUNDING_BUFFER_BPS
         value: "3"
       - key: FUTURES_SLIPPAGE_BPS
-        value: "5"
+        value: "3"
       - key: FUTURES_POLL_SECONDS
         value: "1"
       - key: FUTURES_MAX_NOTIONAL_USDT
-        value: "5"
+        value: "0"
       - key: FUTURES_ORDER_NOTIONAL_USDT
-        value: "5"
+        value: "0"
       - key: MIN_NET_EDGE_BPS
-        value: "2"
+        value: "3"
       - key: MIN_EXPECTED_PROFIT_USDT
-        value: "0.01"
+        value: "0"
       - key: MIN_TRADE_NOTIONAL_USDT
         value: "5"
       - key: MAX_NOTIONAL_USDT
-        value: "5"
+        value: "0"
       - key: MAX_SLIPPAGE_BPS
-        value: "15"
+        value: "3"
       - key: FEE_BPS
         value: "10"
       - key: ARB_RISK_PCT
         value: "0.0015"
+      - key: ARB_CAPITAL_ALLOCATION_PCT
+        value: "0.95"
+      - key: ARB_SAFETY_RESERVE_USDT
+        value: "1"
       - key: LIVE_ORDER_COOLDOWN_MS
-        value: "1000"
+        value: "0"
       - key: MAX_TRIANGLES
         value: "0"
       - key: STREAM_SYMBOL_CAP
         value: "0"
       - key: STALE_MS
-        value: "1000"
+        value: "500"
       - key: POLL_INTERVAL_SECONDS
-        value: "0.05"
+        value: "0.02"
+      - key: POSITION_TIMEOUT_SECONDS
+        value: "15"
+      - key: MAX_CONSECUTIVE_LOSSES
+        value: "5"
+      - key: MAX_DRAWDOWN_PCT
+        value: "15"
       - key: ORDER_TIMEOUT_MS
         value: "5000"
       - key: DEPTH_LEVELS
