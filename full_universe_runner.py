@@ -1,3 +1,4 @@
+# DRAGON_LIVE_SCANNER_RECOVERY_V2
 import asyncio
 import json
 import os
@@ -84,6 +85,9 @@ async def _feed_worker(cfg, symbols, queue, worker_id):
                         msg = json.loads(raw)
                         data = msg.get("data", msg)
                         if data.get("s") and data.get("b") is not None and data.get("a") is not None:
+                            with web_runner.LOCK:
+                                web_runner.STATE["last_depth_update"] = time.time()
+                                web_runner.STATE["market_data_updates"] = web_runner.STATE.get("market_data_updates", 0) + 1
                             if queue.full():
                                 try:
                                     queue.get_nowait()
@@ -125,7 +129,9 @@ async def _rest_book_ticker_worker(client, symbols, queue):
             with web_runner.LOCK:
                 shard_status = dict(web_runner.STATE.get("ws_shard_status", {}))
                 ws_up = any(value == "connected" for value in shard_status.values())
-            if ws_up:
+                last_depth = float(web_runner.STATE.get("last_depth_update", 0) or 0)
+                depth_silent = last_depth <= 0 or (time.time() - last_depth) > 8.0
+            if ws_up and not depth_silent:
                 await asyncio.sleep(REST_FALLBACK_SECONDS)
                 continue
 
@@ -154,7 +160,7 @@ async def _rest_book_ticker_worker(client, symbols, queue):
             with web_runner.LOCK:
                 web_runner.STATE.setdefault("rest_fallback_updates", 0)
                 web_runner.STATE["rest_fallback_updates"] += count
-            web_runner.event("REST_FALLBACK", f"WS unavailable; BookTicker refreshed {count} symbols", symbols=count)
+            web_runner.event("REST_FALLBACK", f"Market-data recovery; BookTicker refreshed {count} symbols", symbols=count, depth_silent=depth_silent)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -226,7 +232,7 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
                 asks = [(p, q) for p, q in item.get("a", [])[:cfg.depth_levels] if Decimal(str(q)) > 0 and Decimal(str(p)) > 0]
                 if not bids or not asks:
                     continue
-                books[symbol] = {"bids": bids, "asks": asks, "depth_ts": time.monotonic() * 1000}
+                books[symbol] = {"bids": bids, "asks": asks, "depth_ts": time.monotonic() * 1000, "source": item.get("_source", "binance_ws_depth") }
                 dirty.update(by_symbol.get(symbol, ()))
             now = time.monotonic() * 1000
             candidates = list(dirty)
