@@ -15,7 +15,9 @@ def main():
     original_connect = websockets.connect
 
     def resilient_connect(*args, **kwargs):
-        kwargs["ping_interval"] = 10
+        # Binance server pings are handled automatically by websockets. Avoid
+        # client-side ping traffic competing with the 5 msg/s control limit.
+        kwargs["ping_interval"] = None
         kwargs["ping_timeout"] = 30
         kwargs["close_timeout"] = 5
         return original_connect(*args, **kwargs)
