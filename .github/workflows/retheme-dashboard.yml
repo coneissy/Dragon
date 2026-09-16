@@ -1,0 +1,75 @@
+name: Build dynamic Dragon dashboard
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  dashboard:
+    if: "!contains(github.event.head_commit.message, '[dashboard-bot]')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Replace dashboard UI
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/dragon/main.py')
+          text = p.read_text()
+          start_marker = "DASHBOARD = r'''"
+          start = text.index(start_marker) + len(start_marker)
+          end = text.index("'''", start)
+          html = r'''<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dragon // Arbitrage Command Center</title>
+<style>
+:root{--bg:#070b14;--panel:rgba(15,22,38,.78);--line:rgba(120,170,255,.18);--text:#f4f7ff;--muted:#8491aa;--cyan:#29e7ff;--violet:#9b6cff;--green:#36f09a;--red:#ff5577;--amber:#ffc857;--pink:#ff4fd8;--shadow:0 18px 60px rgba(0,0,0,.35)}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 10% 0%,#172a52 0,#070b14 38%,#05070d 100%);color:var(--text);font:14px Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;min-height:100vh}body:before{content:"";position:fixed;inset:0;pointer-events:none;background:linear-gradient(115deg,transparent 0 42%,rgba(41,231,255,.035) 50%,transparent 58%)}
+main{max-width:1500px;margin:auto;padding:24px}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:20px}.brand{display:flex;align-items:center;gap:14px}.dragon{width:54px;height:54px;border-radius:16px;display:grid;place-items:center;font-size:29px;background:linear-gradient(135deg,#1b2f58,#5d2a9f);box-shadow:0 0 35px rgba(155,108,255,.28);border:1px solid rgba(255,255,255,.12)}h1{margin:0;font-size:26px;letter-spacing:-.7px}.sub{color:var(--muted);margin-top:4px}.statusbar{display:flex;align-items:center;gap:10px;padding:11px 14px;border:1px solid var(--line);background:rgba(10,16,29,.7);border-radius:14px}.dot{width:9px;height:9px;border-radius:50%;display:inline-block;background:var(--red);box-shadow:0 0 14px currentColor}.dot.on{background:var(--green)}
+.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.card{background:linear-gradient(145deg,rgba(18,27,47,.9),rgba(9,14,26,.82));border:1px solid var(--line);border-radius:18px;padding:16px;box-shadow:var(--shadow);backdrop-filter:blur(14px)}.metric{position:relative;overflow:hidden}.metric:after{content:"";position:absolute;right:-25px;bottom:-35px;width:110px;height:110px;border-radius:50%;background:var(--glow,rgba(41,231,255,.12));filter:blur(4px)}.label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}.value{font-size:27px;font-weight:800;margin-top:7px;letter-spacing:-.5px}.cyan{color:var(--cyan)}.green{color:var(--green)}.red{color:var(--red)}.amber{color:var(--amber)}.violet{color:var(--violet)}
+.layout{display:grid;grid-template-columns:1.45fr .75fr;gap:12px;margin-top:12px}.wide{min-height:390px}.panelhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:13px}.panelhead h2{font-size:15px;margin:0}.badge{padding:5px 9px;border-radius:999px;background:rgba(41,231,255,.09);border:1px solid rgba(41,231,255,.2);color:var(--cyan);font-size:11px}.table{width:100%;border-collapse:collapse}.table th{text-align:left;color:var(--muted);font-size:10px;text-transform:uppercase;padding:8px;border-bottom:1px solid var(--line)}.table td{padding:10px 8px;border-bottom:1px solid rgba(120,170,255,.09);font-size:12px}.pill{display:inline-flex;padding:4px 7px;border-radius:8px;font-size:10px;font-weight:800;background:rgba(54,240,154,.1);color:var(--green);border:1px solid rgba(54,240,154,.18)}
+.feed{max-height:345px;overflow:auto}.event{display:grid;grid-template-columns:72px 95px 1fr;gap:9px;padding:10px 0;border-bottom:1px solid rgba(120,170,255,.08);font-size:12px}.time,.kind{color:var(--muted)}.kind{font-weight:700}.spark{height:100px;display:flex;align-items:end;gap:3px;margin-top:12px}.bar{flex:1;min-width:3px;border-radius:5px 5px 2px 2px;background:linear-gradient(to top,var(--violet),var(--cyan));opacity:.8}.hero{grid-column:span 2}.mini{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px}.mini .card{padding:12px}.bigline{font-size:13px;color:#dce5f7}.footer{padding:16px 2px;color:#5e6a82;text-align:center;font-size:11px}
+@media(max-width:1050px){.grid{grid-template-columns:repeat(2,1fr)}.layout{grid-template-columns:1fr}.hero{grid-column:span 1}}@media(max-width:620px){main{padding:13px}.grid{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}.statusbar{width:100%;justify-content:center}.event{grid-template-columns:60px 80px 1fr}.value{font-size:23px}}
+</style>
+</head>
+<body><main>
+<header class="top"><div class="brand"><div class="dragon">🐉</div><div><h1>Dragon Command Center</h1><div class="sub">MAX UNIVERSE • Spot Arbitrage • Live Market Intelligence</div></div></div><div class="statusbar"><span id="wsdot" class="dot"></span><b id="ws">CONNECTING</b><span style="color:#56637b">•</span><span id="mode">SAFE</span><span style="color:#56637b">•</span><span id="clock">--:--:--</span></div></header>
+<section class="grid" id="metrics"></section>
+<div class="layout">
+<section class="card wide"><div class="panelhead"><h2>⚡ Opportunity Radar</h2><span class="badge" id="oppbadge">SCANNING</span></div><div id="opps"><div class="bigline">Waiting for live opportunity events...</div></div><div class="spark" id="spark"></div></section>
+<section class="card wide"><div class="panelhead"><h2>🧠 Engine Health</h2><span class="badge" id="healthbadge">BOOTING</span></div><div id="health"></div><div class="mini" id="mini"></div></section>
+<section class="card hero"><div class="panelhead"><h2>📡 Live Event Stream</h2><span class="badge">AUTO • 2s</span></div><div class="feed" id="feed">Loading...</div></section>
+<section class="card"><div class="panelhead"><h2>💰 Capital</h2><span class="badge">USDT</span></div><div class="value cyan" id="capital">0</div><div class="sub">Available balance</div><div class="value green" id="pnl">0</div><div class="sub">Realized P&amp;L</div></section>
+</div><div class="footer">Dragon Arbitrage Engine • telemetry from /health • execution gates remain active</div>
+</main>
+<script>
+const $=id=>document.getElementById(id);const esc=x=>String(x??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+function fmt(x){return Number(x||0).toLocaleString(undefined,{maximumFractionDigits:4})}function ts(t){return new Date((t||Date.now()/1000)*1000).toLocaleTimeString()}
+function render(s){
+ $('clock').textContent=new Date().toLocaleTimeString();$('ws').textContent=s.ws_connected?'BINANCE CONNECTED':'BINANCE DISCONNECTED';$('wsdot').className='dot '+(s.ws_connected?'on':'');$('mode').textContent=(s.live&&!s.dry_run)?'LIVE EXECUTION':'PAPER / SAFE';
+ const cards=[['Triangles',s.triangles,'violet'],['Symbols',s.symbols,'cyan'],['Streams',s.market_streams,'cyan'],['Depth Updates',s.depth_updates,'green'],['Scans',s.scans,'violet'],['Opportunities',s.opportunities,'amber'],['Executions',s.executions,'green'],['Risk Blocks',s.risk_blocks,'red'],['Errors',s.execution_errors,'red'],['Reconnects',s.reconnects,'amber'],['Filled Ledger',s.ledger_filled,'green'],['Min Notional Blocks',s.min_notional_blocks,'amber']];
+ $('metrics').innerHTML=cards.map(c=>`<div class="card metric" style="--glow:color-mix(in srgb,var(--${c[2]}) 13%,transparent)"><div class="label">${c[0]}</div><div class="value ${c[2]}">${fmt(c[1])}</div></div>`).join('');
+ $('capital').textContent=fmt(s.free_usdt);$('pnl').textContent=fmt(s.realized_pnl_usdt);
+ $('healthbadge').textContent=String(s.status||'unknown').toUpperCase();$('health').innerHTML=`<div class="bigline">API: <b class="${s.binance_authenticated?'green':'red'}">${s.binance_authenticated?'AUTHENTICATED':'NOT AUTHENTICATED'}</b></div><div class="bigline" style="margin-top:10px">Engine: <b class="${s.status==='running'?'green':'amber'}">${esc(s.status)}</b></div><div class="bigline" style="margin-top:10px">Last error: <span style="color:#aeb9cf">${esc(s.last_error||'None')}</span></div>`;
+ $('mini').innerHTML=[['Acks',s.subscription_acks],['Balances',s.balance_refreshes],['Uptime',s.started_at?Math.floor((Date.now()/1000-s.started_at)/60)+'m':'--']].map(x=>`<div class="card"><div class="label">${x[0]}</div><b>${fmt(x[1])}</b></div>`).join('');
+ const events=(s.recent||[]).slice().reverse();$('feed').innerHTML=events.length?events.map(e=>`<div class="event"><span class="time">${ts(e.ts)}</span><span class="kind">${esc(e.kind)}</span><span>${esc(e.message)} ${e.net_bps!=null?`<b class="green">${Number(e.net_bps).toFixed(3)} bps</b>`:''}</span></div>`).join(''):'<div class="sub">Waiting for events...</div>';
+ const opps=events.filter(e=>e.kind==='OPPORTUNITY').slice(0,8);$('oppbadge').textContent=opps.length?`${opps.length} RECENT`:'SCANNING';$('opps').innerHTML=opps.length?`<table class="table"><thead><tr><th>Time</th><th>Path</th><th>Gross</th><th>Net</th><th>Status</th></tr></thead><tbody>${opps.map(e=>`<tr><td>${ts(e.ts)}</td><td class="mono">${esc((e.path||[]).join(' → '))}</td><td>${Number(e.gross_bps||0).toFixed(2)} bps</td><td class="green"><b>${Number(e.net_bps||0).toFixed(2)} bps</b></td><td><span class="pill">DETECTED</span></td></tr>`).join('')}</tbody></table>`:'<div class="bigline">No qualifying opportunities recorded yet. Scanner is active.</div>';
+ const vals=events.slice(0,45).map(e=>Math.max(4,Math.min(100,Number(e.net_bps||8)*7)));$('spark').innerHTML=vals.reverse().map(v=>`<div class="bar" style="height:${v}%"></div>`).join('');
+}
+async function tick(){try{const r=await fetch('/health?'+Date.now(),{cache:'no-store'});const j=await r.json();render(j.state||{});}catch(e){$('ws').textContent='DASHBOARD OFFLINE';$('wsdot').className='dot';}}tick();setInterval(tick,2000);
+</script></body></html>'''
+          p.write_text(text[:start] + html + text[end:])
+          PY
+      - name: Commit dashboard
+        run: |
+          git config user.name 'dragon-dashboard-bot'
+          git config user.email 'dragon-dashboard-bot@users.noreply.github.com'
+          git add src/dragon/main.py
+          git diff --cached --quiet || git commit -m '[dashboard-bot] Build dynamic colorful command center'
+          git push
