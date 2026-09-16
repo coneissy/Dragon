@@ -4,7 +4,7 @@ from decimal import Decimal
 
 
 class _RateLimitedConnect:
-    """Async context/await wrapper that paces Binance control messages."""
+    """Async websocket proxy that paces Binance client control messages."""
 
     def __init__(self, connect_factory, args, kwargs):
         self._connect_factory = connect_factory
@@ -18,35 +18,36 @@ class _RateLimitedConnect:
 
     async def _wait(self):
         self._connection = await self._connect_factory(*self._args, **self._kwargs)
-        self._wrap_send()
-        return self._connection
+        return self
 
     async def __aenter__(self):
         self._connection = await self._connect_factory(*self._args, **self._kwargs)
-        self._wrap_send()
-        return self._connection
+        return self
 
     async def __aexit__(self, exc_type, exc, tb):
         return await self._connection.__aexit__(exc_type, exc, tb)
 
-    def _wrap_send(self):
-        original_send = self._connection.send
+    async def send(self, message):
+        is_control = False
+        if isinstance(message, str):
+            try:
+                import json
+                payload = json.loads(message)
+                is_control = isinstance(payload, dict) and isinstance(payload.get("method"), str)
+            except (TypeError, ValueError):
+                is_control = False
+        if is_control:
+            now = time.monotonic()
+            wait = 0.26 - (now - self._last_control_send)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_control_send = time.monotonic()
+        return await self._connection.send(message)
 
-        async def paced_send(message):
-            is_control = (
-                isinstance(message, str)
-                and '"method"' in message
-                and '"SUBSCRIBE"' in message
-            )
-            if is_control:
-                now = time.monotonic()
-                wait = 0.26 - (now - self._last_control_send)
-                if wait > 0:
-                    await asyncio.sleep(wait)
-                self._last_control_send = time.monotonic()
-            return await original_send(message)
-
-        self._connection.send = paced_send
+    def __getattr__(self, name):
+        if self._connection is None:
+            raise AttributeError(name)
+        return getattr(self._connection, name)
 
 
 def main():
@@ -62,7 +63,7 @@ def main():
 
     def resilient_connect(*args, **kwargs):
         # Binance server pings are handled automatically by websockets. Avoid
-        # client-side ping traffic competing with the 5 msg/s control limit.
+        # client-side ping traffic competing with the websocket control limit.
         kwargs["ping_interval"] = None
         kwargs["ping_timeout"] = 30
         kwargs["close_timeout"] = 5
