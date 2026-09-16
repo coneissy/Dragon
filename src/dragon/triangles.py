@@ -75,6 +75,19 @@ def _walk(symbol: str, side: str, qty: Decimal, books: dict):
     return result
 
 
+def _top_output(symbol: str, side: str, qty: Decimal, books: dict):
+    book = books.get(symbol, {})
+    levels = book.get("bids" if side == "sell" else "asks") or []
+    if not levels:
+        return None
+    price = Decimal(str(levels[0][0]))
+    if price <= 0 or qty <= 0:
+        return None
+    if side == "sell":
+        return qty * price
+    return qty / price
+
+
 def _dynamic_safety_bps(t: Triangle, books: dict, symbol_meta: dict, start: Decimal, max_safety_bps: float) -> Decimal:
     cap = Decimal(str(max(0.0, max_safety_bps)))
     if cap <= 0:
@@ -120,12 +133,12 @@ def _dynamic_safety_bps(t: Triangle, books: dict, symbol_meta: dict, start: Deci
 
 
 def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_meta=None, notional_usdt=1.0):
-    """Return the authoritative projected three-leg execution outcome.
+    """Project a three-leg execution from live depth.
 
-    The same quantity produced by each leg is propagated into the next leg.
-    Each leg is priced through available depth and then charged the configured
-    taker fee. This is a pre-trade projection only. Actual execution must still
-    use returned fills and commissionAsset/commission from Binance responses.
+    Quantities are propagated leg-to-leg. Each leg pays the supplied taker fee.
+    The projection is deliberately conservative and is not an execution fill
+    guarantee. The executor remains authoritative for actual commission and
+    exchange filter behavior.
     """
     symbol_meta = symbol_meta or {}
     start = Decimal(str(notional_usdt))
@@ -140,6 +153,9 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
 
     legs = []
     total_fee_equivalent = Decimal("0")
+    total_depth_drag_bps = Decimal("0")
+    top_amount = start
+
     for i, symbol in enumerate(t.symbols):
         meta = symbol_meta.get(symbol)
         if not meta:
@@ -154,20 +170,23 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
         else:
             return None
 
-        book = books.get(symbol, {})
-        levels = book.get("asks" if side == "BUY" else "bids") or []
+        side_lower = side.lower()
+        levels = books.get(symbol, {}).get("asks" if side == "BUY" else "bids") or []
         if not levels:
             return None
         top_price = Decimal(str(levels[0][0]))
 
-        gross_next = _walk(symbol, side.lower(), gross_amount, books)
-        net_before_fee = _walk(symbol, side.lower(), net_amount, books)
-        if gross_next is None or net_before_fee is None or gross_next <= 0 or net_before_fee <= 0:
+        gross_next = _walk(symbol, side_lower, gross_amount, books)
+        net_before_fee = _walk(symbol, side_lower, net_amount, books)
+        top_net_output = _top_output(symbol, side_lower, net_amount, books)
+        top_gross_output = _top_output(symbol, side_lower, gross_amount, books)
+        if any(x is None or x <= 0 for x in (gross_next, net_before_fee, top_net_output, top_gross_output)):
             return None
 
         fee = net_before_fee * (Decimal("1") - fee_factor)
         net_next = net_before_fee * fee_factor
-        impact_bps = (net_before_fee / net_amount - gross_next / gross_amount) * Decimal("10000") if gross_amount > 0 and net_amount > 0 else Decimal("0")
+        depth_drag_bps = (net_before_fee / top_net_output - Decimal("1")) * Decimal("10000")
+        total_depth_drag_bps += depth_drag_bps
         legs.append({
             "symbol": symbol,
             "side": side,
@@ -178,11 +197,15 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
             "output_after_fee": str(net_next),
             "fee": str(fee),
             "top_price": str(top_price),
-            "depth_impact_bps": str(impact_bps),
+            "top_output": str(top_net_output),
+            "depth_drag_bps": str(depth_drag_bps),
         })
         total_fee_equivalent += fee
         gross_amount = gross_next
         net_amount = net_next
+        top_amount = _top_output(symbol, side_lower, top_amount, books)
+        if top_amount is None or top_amount <= 0:
+            return None
 
     safety_bps = _dynamic_safety_bps(t, books, symbol_meta, start, slippage_bps)
     gross_pnl = gross_amount - start
@@ -192,19 +215,25 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
     net_pnl = projected_final - start
     gross_bps = gross_pnl / start * Decimal("10000")
     net_bps = net_pnl / start * Decimal("10000")
+    fee_drag_bps = (Decimal("1") - (fee_factor ** 3)) * Decimal("10000")
+    top_of_book_gross_bps = (top_amount / start - Decimal("1")) * Decimal("10000")
+
     return {
         "start_usdt": start,
         "gross_final": gross_amount,
         "gross_pnl_usdt": gross_pnl,
         "gross_bps": gross_bps,
+        "top_of_book_gross_bps": top_of_book_gross_bps,
         "post_fee_final": net_amount,
         "net_pnl_before_safety_usdt": net_pnl_before_safety,
+        "fee_drag_bps": fee_drag_bps,
+        "total_fee_equivalent": total_fee_equivalent,
+        "depth_drag_bps": total_depth_drag_bps,
         "safety_bps": safety_bps,
         "safety_cost_usdt": safety_cost,
         "final_usdt": projected_final,
         "net_pnl_usdt": net_pnl,
         "net_bps": net_bps,
-        "total_fee_equivalent": total_fee_equivalent,
         "legs": legs,
         "path": t.symbols,
         "first_asset": t.assets[1],
