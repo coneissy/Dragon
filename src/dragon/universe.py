@@ -114,9 +114,10 @@ def classify_triangle(triangle, books: dict, symbol_meta: dict[str, tuple[str, s
         liquidity_factors.append(min(D("1"), top_value / trade_notional))
 
     liquidity = min(liquidity_factors, default=D("0"))
-    # Persistence remains neutral until independently observed outcomes are
-    # available. It must not be fabricated from the same quote snapshot.
-    persistence = D("1")
+    # Persistence is deliberately neutral until independently observed
+    # outcomes are available. It must not be fabricated from the same quote
+    # snapshot, and neutral means 0.5 in the normalized scoring model.
+    persistence = D("0.5")
 
     if net_edge_bps <= D("0"):
         return TriangleUniverseDecision("D", False, False, D("0"), liquidity, persistence, "NEGATIVE_NET_EDGE")
