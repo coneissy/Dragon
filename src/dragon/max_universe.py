@@ -81,10 +81,19 @@ def _tier(score: Decimal, tiers: Mapping[str, Any]) -> tuple[str, Decimal]:
     return "REJECT", _d(tiers.get("reject_below", 40))
 
 
-def score_opportunity(*, gross_edge_bps: Any, liquidity_score: Any, persistence_score: Any, penalties: Any = 0, observing_platforms: int = 1, profile: Mapping[str, Any]) -> tuple[Decimal, str, Decimal]:
+def score_opportunity(
+    *,
+    gross_edge_bps: Any,
+    liquidity_score: Any,
+    persistence_score: Any,
+    penalties: Any = 0,
+    observing_platforms: int = 1,
+    profile: Mapping[str, Any],
+) -> tuple[Decimal, str, Decimal]:
     scoring = profile["opportunity_scoring"]
     weights = scoring["weights"]
     bonus_cfg = profile["multi_platform_scoring"]["bonuses"]
+
     if observing_platforms >= 7:
         bonus = _d(bonus_cfg["seven_plus"])
     elif observing_platforms >= 4:
@@ -93,31 +102,72 @@ def score_opportunity(*, gross_edge_bps: Any, liquidity_score: Any, persistence_
         bonus = _d(bonus_cfg["two_to_three"])
     else:
         bonus = _d(bonus_cfg["single_platform"])
+
     score = (
         _d(gross_edge_bps) * _d(weights["edge"])
         + _d(liquidity_score) * _d(weights["liquidity"])
         + _d(persistence_score) * _d(weights["persistence"])
         - min(_d(penalties), _d(scoring["penalty_max"]))
         + bonus
+    )
     score = max(Decimal("0"), min(Decimal("100"), score))
     tier, _ = _tier(score, scoring["tiers"])
     return score, tier, bonus
 
 
-def evaluate_cross_exchange(*, symbol: str, buy_venue: str, sell_venue: str, buy_ask: Any, sell_bid: Any, executable_notional_usdt: Any, buy_fee_bps: Any, sell_fee_bps: Any, slippage_bps: Any, latency_penalty_bps: Any, book_age_ms: Any, depth_ok: bool, binance_connected: bool, observing_platforms: int, liquidity_score: Any = 100, persistence_score: Any = 100, penalties: Any = 0, profile: Mapping[str, Any] | None = None) -> Opportunity:
+def evaluate_cross_exchange(
+    *,
+    symbol: str,
+    buy_venue: str,
+    sell_venue: str,
+    buy_ask: Any,
+    sell_bid: Any,
+    executable_notional_usdt: Any,
+    buy_fee_bps: Any,
+    sell_fee_bps: Any,
+    slippage_bps: Any,
+    latency_penalty_bps: Any,
+    book_age_ms: Any,
+    depth_ok: bool,
+    binance_connected: bool,
+    observing_platforms: int,
+    liquidity_score: Any = 100,
+    persistence_score: Any = 100,
+    penalties: Any = 0,
+    profile: Mapping[str, Any] | None = None,
+) -> Opportunity:
     if profile is None:
         raise ValueError("profile is required")
     validate_profile(profile)
-    gross = (_d(sell_bid) / _d(buy_ask) - Decimal("1")) * Decimal("10000")
+
+    ask = _d(buy_ask)
+    bid = _d(sell_bid)
+    if ask <= 0 or bid <= 0:
+        raise ValueError("buy_ask and sell_bid must be positive")
+
+    gross = (bid / ask - Decimal("1")) * Decimal("10000")
     fee = _d(buy_fee_bps) + _d(sell_fee_bps)
     net = gross - fee - _d(slippage_bps) - _d(latency_penalty_bps)
     notional = max(Decimal("0"), _d(executable_notional_usdt))
-    score, tier, _ = score_opportunity(gross_edge_bps=gross, liquidity_score=liquidity_score, persistence_score=persistence_score, penalties=penalties, observing_platforms=observing_platforms, profile=profile)
+
+    score, tier, _ = score_opportunity(
+        gross_edge_bps=gross,
+        liquidity_score=liquidity_score,
+        persistence_score=persistence_score,
+        penalties=penalties,
+        observing_platforms=observing_platforms,
+        profile=profile,
+    )
+
     min_score = _d(profile["opportunity_scoring"]["min_entry_score"])
     min_edge = _d(profile["hard_gates"]["min_edge"]["condition"].split(">=")[1].strip())
     stale_text = profile["hard_gates"]["fresh_data"]["condition"]
     stale_limit = Decimal(stale_text.split("(")[1].split("ms")[0].strip())
-    position_limit = _d(profile["dragon"]["tradeable_balance"]) * _d(profile["compounding"]["position_pct"]) / Decimal("100")
+    position_limit = (
+        _d(profile["dragon"]["tradeable_balance"])
+        * _d(profile["compounding"]["position_pct"])
+        / Decimal("100")
+    )
 
     if not binance_connected:
         gate, position_pct = "BINANCE_CONNECTIVITY", Decimal("0")
@@ -137,4 +187,20 @@ def evaluate_cross_exchange(*, symbol: str, buy_venue: str, sell_venue: str, buy
 
     executable = min(notional, position_limit)
     expected = executable * net / Decimal("10000")
-    return Opportunity(symbol=symbol, buy_venue=buy_venue, sell_venue=sell_venue, gross_edge_bps=gross, fee_bps=fee, slippage_bps=_d(slippage_bps), latency_penalty_bps=_d(latency_penalty_bps), net_edge_bps=net, executable_notional_usdt=executable, expected_profit_usdt=expected, score=score, tier=tier, position_pct=position_pct, gate=gate)
+
+    return Opportunity(
+        symbol=symbol,
+        buy_venue=buy_venue,
+        sell_venue=sell_venue,
+        gross_edge_bps=gross,
+        fee_bps=fee,
+        slippage_bps=_d(slippage_bps),
+        latency_penalty_bps=_d(latency_penalty_bps),
+        net_edge_bps=net,
+        executable_notional_usdt=executable,
+        expected_profit_usdt=expected,
+        score=score,
+        tier=tier,
+        position_pct=position_pct,
+        gate=gate,
+    )
