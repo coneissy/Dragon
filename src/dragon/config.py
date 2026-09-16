@@ -72,7 +72,7 @@ class Config:
             dry_run=cls._bool("DRY_RUN", cls.dry_run),
             live_trading=cls._bool("LIVE_TRADING", cls.live_trading),
             min_net_edge_bps=max(FIXED_NET_EDGE_FLOOR_BPS, requested_min_edge),
-            min_expected_profit_usdt=float(os.getenv("MIN_EXPECTED_PROFIT_USDT", str(cls.min_expected_profit_usdt))),
+            min_expected_profit_usdt=0.0,
             min_trade_notional_usdt=FIXED_MIN_TRADE_NOTIONAL_USDT,
             max_notional_usdt=max(0.0, requested_max_notional),
             max_slippage_bps=float(os.getenv("MAX_SLIPPAGE_BPS", str(cls.max_slippage_bps))),
