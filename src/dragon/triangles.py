@@ -129,7 +129,7 @@ def _fee_factor(fee_bps: Decimal) -> Decimal:
 
 
 def _three_leg_fee_drag_bps(fee_bps: Decimal, legs: int = 3) -> Decimal:
-    """Exact compounded fee drag for N sequential percentage fees."""
+    """Constant-price compounded fee drag for diagnostics."""
     if legs <= 0 or fee_bps < 0:
         return Decimal("0")
     factor = _fee_factor(fee_bps)
@@ -138,23 +138,27 @@ def _three_leg_fee_drag_bps(fee_bps: Decimal, legs: int = 3) -> Decimal:
     return (Decimal("1") - factor ** legs) * Decimal("10000")
 
 
-def _break_even_gross_bps(fee_bps: Decimal, legs: int = 3, safety_bps: Decimal = Decimal("0")) -> Decimal:
-    """Gross edge required for zero projected P&L after fees and safety."""
-    if legs <= 0 or fee_bps < 0 or safety_bps < 0:
+def _break_even_gross_bps_from_execution(gross_final: Decimal, net_final: Decimal, start: Decimal, safety_factor: Decimal) -> Decimal:
+    """Exact break-even gross edge for the observed executable path.
+
+    Unlike a fixed fee-only formula, this preserves order-book non-linearity:
+    fees change the quantity entering later legs, which can change depth impact.
+    """
+    if gross_final <= 0 or net_final <= 0 or start <= 0 or safety_factor <= 0:
         return Decimal("0")
-    fee_factor = _fee_factor(fee_bps)
-    safety_factor = Decimal("1") - safety_bps / Decimal("10000")
-    if fee_factor <= 0 or safety_factor <= 0:
+    execution_cost_multiplier = (net_final / gross_final) * safety_factor
+    if execution_cost_multiplier <= 0:
         return Decimal("0")
-    return (Decimal("1") / (fee_factor ** legs * safety_factor) - Decimal("1")) * Decimal("10000")
+    return (Decimal("1") / execution_cost_multiplier - Decimal("1")) * Decimal("10000")
 
 
 def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_meta=None, notional_usdt=1.0):
     """Authoritative executable triangle calculation.
 
-    Formula: start -> depth execution on each leg -> one fee on each leg ->
-    multiplicative safety haircut -> projected final USDT. Depth impact is
-    measured from actual executable levels and is not added again as slippage.
+    Formula: start -> actual order-book depth on each leg -> one authenticated
+    fee on each leg -> multiplicative execution-safety haircut -> final USDT.
+    No separate slippage haircut is applied to depth impact; the safety value
+    is an execution-risk buffer only.
     """
     symbol_meta = symbol_meta or {}
     start = Decimal(str(notional_usdt))
@@ -172,7 +176,6 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
     legs = []
     actual_fee_total = Decimal("0")
     total_fee_drag_bps = _three_leg_fee_drag_bps(fee_bps, len(t.symbols))
-    fee_drag_equivalent_usdt = start * total_fee_drag_bps / Decimal("10000")
     total_depth_drag_bps = Decimal("0")
 
     for i, symbol in enumerate(t.symbols):
@@ -238,17 +241,24 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
     net_pnl = projected_final - start
     gross_bps = gross_pnl / start * Decimal("10000")
     net_bps = net_pnl / start * Decimal("10000")
-    break_even_gross_bps = _break_even_gross_bps(fee_bps, len(t.symbols), safety_bps)
+
+    # Exact for the observed executable depth path. This replaces the old
+    # fee-only break-even approximation that ignored depth changes caused by fees.
+    break_even_gross_bps = _break_even_gross_bps_from_execution(
+        gross_amount, net_amount, start, safety_factor
+    )
     top_of_book_gross_bps = (top_amount / start - Decimal("1")) * Decimal("10000")
     depth_adjusted_gross_bps = gross_bps
     cost_to_break_even_bps = break_even_gross_bps - gross_bps
 
     # Independent reconciliation values make dashboard/runtime audits explicit.
     fee_drag_actual_bps = actual_fee_total / start * Decimal("10000")
+    fee_drag_equivalent_usdt = actual_fee_total
     safety_drag_bps = safety_cost / start * Decimal("10000")
     total_cost_bps = gross_bps - net_bps
     projected_from_multiplier = start * (net_amount / start) * safety_factor
     reconciliation_error_usdt = projected_final - projected_from_multiplier
+    execution_cost_drag_bps = (Decimal("1") - (net_amount / gross_amount) * safety_factor) * Decimal("10000")
 
     return {
         "start_usdt": start,
@@ -264,6 +274,7 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
         "fee_drag_bps": total_fee_drag_bps,
         "fee_drag_equivalent_usdt": fee_drag_equivalent_usdt,
         "fee_drag_actual_bps": fee_drag_actual_bps,
+        "execution_cost_drag_bps": execution_cost_drag_bps,
         "break_even_gross_bps": break_even_gross_bps,
         "cost_to_break_even_bps": cost_to_break_even_bps,
         "depth_drag_bps": total_depth_drag_bps,
