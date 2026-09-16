@@ -108,19 +108,17 @@ async def run():
                     except (KeyError, ValueError, ArithmeticError):
                         continue
 
-                # evaluate_basis applies directional funding and the configured
-                # minimum edge. Apply the buffer as a separate haircut to the
-                # reported executable edge, preserving the signed funding rate.
-                raw_min_edge = min_edge
-                opportunities = evaluate_basis(rows, fee_bps, raw_min_edge, slippage_bps)
-                qualified = []
-                for symbol, raw_edge, direction in opportunities:
+                # First calculate the real directional basis net of fees and
+                # execution slippage. Then apply the funding buffer separately.
+                raw_opportunities = evaluate_basis(rows, fee_bps, Decimal("-1000000"), slippage_bps)
+                opportunities = []
+                for symbol, raw_edge, direction in raw_opportunities:
                     net_after_buffer = raw_edge - funding_buffer
-                    if net_after_buffer < min_edge:
-                        continue
-                    qualified.append((symbol, net_after_buffer, direction))
+                    if net_after_buffer >= min_edge:
+                        opportunities.append((symbol, net_after_buffer, direction))
+                opportunities.sort(key=lambda item: item[1], reverse=True)
 
-                for symbol, net_after_buffer, direction in qualified[:50]:
+                for symbol, net_after_buffer, direction in opportunities[:50]:
                     row = next((r for r in rows if r["symbol"] == symbol), None)
                     if not row:
                         continue
@@ -129,11 +127,10 @@ async def run():
                         web_runner.event("FUTURES_BLOCKED", f"{symbol} live execution intentionally disabled by validator; positive edge={net_after_buffer:.3f}bps direction={direction}")
 
                 with web_runner.LOCK:
-                    STATE = web_runner.STATE
-                    STATE["futures_scans"] += 1
-                    STATE["futures_opportunities"] += len(qualified)
-                    STATE["futures_last_scan"] = time.time()
-                web_runner.event("FUTURES_SCAN", f"complete universe={len(symbols)} opportunities={len(qualified)} best={(qualified[0] if qualified else None)}")
+                    web_runner.STATE["futures_scans"] += 1
+                    web_runner.STATE["futures_opportunities"] += len(opportunities)
+                    web_runner.STATE["futures_last_scan"] = time.time()
+                web_runner.event("FUTURES_SCAN", f"complete universe={len(symbols)} opportunities={len(opportunities)} best={(opportunities[0] if opportunities else None)}")
             except FuturesError as exc:
                 with web_runner.LOCK:
                     web_runner.STATE["futures_errors"] += 1
