@@ -22,11 +22,13 @@ def test_workbook_universe_contract():
 def test_workbook_tiers_are_ordered_as_specified():
     expected = {"S": 90, "A_plus": 85, "A": 80, "B_plus": 70, "B": 60, "C": 40}
     assert {k: PROFILE["opportunity_scoring"]["tiers"][k] for k in expected} == expected
-    for score, tier in [(95, "S"), (87, "A_plus"), (82, "A"), (75, "B_plus"), (65, "B"), (50, "C")]:
+    # Liquidity+persistence at 100 contribute 50 points, so these gross-edge
+    # values land in each workbook tier without relying on an invented bonus.
+    for gross_edge, tier in [(90, "S"), (74, "A_plus"), (64, "A"), (50, "B_plus"), (30, "B"), (0, "C")]:
         _, actual, _ = score_opportunity(
-            gross_edge_bps=score,
-            liquidity_score=0,
-            persistence_score=0,
+            gross_edge_bps=gross_edge,
+            liquidity_score=100,
+            persistence_score=100,
             observing_platforms=1,
             profile=PROFILE,
         )
