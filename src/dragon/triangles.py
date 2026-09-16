@@ -111,10 +111,8 @@ def _dynamic_safety_bps(t: Triangle, books: dict, symbol_meta: dict, start: Deci
         if price <= 0 or qty <= 0:
             return cap
         # Compare input liquidity in the same unit as the input amount.
-        # For BUY, the top-level quote value is qty * price. For SELL, the
-        # available input is base qty directly. The previous implementation
-        # compared SELL base quantity against quote notional, producing a
-        # dimensionally invalid liquidity ratio and excessive safety drag.
+        # BUY input is quote, so top-level quote liquidity is base_qty * price.
+        # SELL input is base, so top-level base liquidity is base_qty.
         input_liquidity = qty * price if side == "buy" else qty
         ratios.append(amount / input_liquidity if input_liquidity > 0 else Decimal("999"))
         out = _walk(symbol, side, amount, books)
@@ -134,17 +132,26 @@ def _dynamic_safety_bps(t: Triangle, books: dict, symbol_meta: dict, start: Deci
 
 
 def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_meta=None, notional_usdt=1.0):
+    """Evaluate a 3-leg triangular path using executable depth and compounded fees.
+
+    fee_bps is the authenticated Binance taker fee expressed in bps per leg.
+    For three equal-fee legs, the fee-only break-even drag is:
+        (1 - (1 - fee_bps/10000)^3) * 10000 bps
+    The actual opportunity gate uses the fully compounded post-fee amount,
+    rather than subtracting 3 * fee_bps from the gross edge.
+    """
     symbol_meta = symbol_meta or {}
     start = Decimal(str(notional_usdt))
     if start <= 0 or len(t.symbols) != 3:
         return None
 
-    gross_amount = start
-    net_amount = start
-    fee_factor = Decimal("1") - Decimal(str(fee_bps)) / Decimal("10000")
-    if fee_factor <= 0:
+    fee_rate = Decimal(str(fee_bps)) / Decimal("10000")
+    fee_factor = Decimal("1") - fee_rate
+    if fee_rate < 0 or fee_factor <= 0:
         return None
 
+    gross_amount = start
+    net_amount = start
     legs = []
     total_fee_equivalent = Decimal("0")
     total_depth_drag_bps = Decimal("0")
@@ -170,16 +177,23 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
             return None
         top_price = Decimal(str(levels[0][0]))
 
+        # Gross path: no fees, but full executable order-book depth.
         gross_next = _walk(symbol, side_lower, gross_amount, books)
+        # Net path: start from the post-fee amount of the previous leg, then
+        # execute this leg at the actual bid/ask depth before charging its fee.
         net_before_fee = _walk(symbol, side_lower, net_amount, books)
         top_net_output = _top_output(symbol, side_lower, net_amount, books)
         if any(x is None or x <= 0 for x in (gross_next, net_before_fee, top_net_output)):
             return None
 
-        fee = net_before_fee * (Decimal("1") - fee_factor)
+        fee = net_before_fee * fee_rate
         net_next = net_before_fee * fee_factor
-        depth_drag_bps = max(Decimal("0"), (Decimal("1") - net_before_fee / top_net_output) * Decimal("10000"))
+        depth_drag_bps = max(
+            Decimal("0"),
+            (Decimal("1") - net_before_fee / top_net_output) * Decimal("10000"),
+        )
         total_depth_drag_bps += depth_drag_bps
+
         legs.append({
             "symbol": symbol,
             "side": side,
@@ -189,10 +203,12 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
             "output_before_fee": str(net_before_fee),
             "output_after_fee": str(net_next),
             "fee": str(fee),
+            "fee_bps": str(Decimal(str(fee_bps))),
             "top_price": str(top_price),
             "top_output": str(top_net_output),
             "depth_drag_bps": str(depth_drag_bps),
         })
+
         total_fee_equivalent += fee
         gross_amount = gross_next
         net_amount = net_next
@@ -206,9 +222,15 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
     safety_cost = start * safety_bps / Decimal("10000")
     projected_final = net_amount - safety_cost
     net_pnl = projected_final - start
+
     gross_bps = gross_pnl / start * Decimal("10000")
     net_bps = net_pnl / start * Decimal("10000")
+
+    # Exact fee-only drag for three equal-fee legs. This is the break-even
+    # gross edge before safety/execution costs. With 15 bps per leg it is
+    # approximately 44.9325 bps, not 45 bps.
     fee_drag_bps = (Decimal("1") - (fee_factor ** 3)) * Decimal("10000")
+    break_even_gross_bps = fee_drag_bps
     top_of_book_gross_bps = (top_amount / start - Decimal("1")) * Decimal("10000")
 
     return {
@@ -219,7 +241,9 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
         "top_of_book_gross_bps": top_of_book_gross_bps,
         "post_fee_final": net_amount,
         "net_pnl_before_safety_usdt": net_pnl_before_safety,
+        "fee_bps_per_leg": Decimal(str(fee_bps)),
         "fee_drag_bps": fee_drag_bps,
+        "break_even_gross_bps": break_even_gross_bps,
         "total_fee_equivalent": total_fee_equivalent,
         "depth_drag_bps": total_depth_drag_bps,
         "safety_bps": safety_bps,
