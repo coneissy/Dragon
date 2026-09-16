@@ -33,7 +33,11 @@ class _RateLimitedConnect:
         original_send = self._connection.send
 
         async def paced_send(message):
-            is_control = isinstance(message, str) and '"method":"SUBSCRIBE"' in message
+            is_control = (
+                isinstance(message, str)
+                and '"method"' in message
+                and '"SUBSCRIBE"' in message
+            )
             if is_control:
                 now = time.monotonic()
                 wait = 0.26 - (now - self._last_control_send)
