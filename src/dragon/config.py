@@ -1,15 +1,10 @@
 from dataclasses import dataclass
 import os
 
-
-# Max Universe v5 quotas from the supplied optimizer workbook.
 FIXED_STARTING_CAPITAL_USDT = 9.0
 FIXED_SAFETY_RESERVE_USDT = 1.0
 FIXED_DEPLOYABLE_USDT = 8.0
 FIXED_MIN_TRADE_NOTIONAL_USDT = 5.0
-# Zero means no fixed dollar ceiling; risk_budget applies the 95% allocation
-# against the current tradeable balance. This preserves the workbook's
-# compounding model instead of freezing the account at the initial $8.
 FIXED_MAX_NOTIONAL_USDT = 0.0
 FIXED_DECISION_CYCLE_SECONDS = 30
 FIXED_UNIVERSE_SYMBOL_CAP = 1000
@@ -21,14 +16,12 @@ FIXED_SPOT_ONLY = False
 FIXED_FUTURES_ENABLED = True
 FIXED_LEVERAGE_ENABLED = False
 FIXED_MARTINGALE_ENABLED = False
-FIXED_ONE_TIME_COMPOUND_TARGET_USDT = 20.0
 FIXED_POSITION_ALLOCATION_PCT = 0.95
 FIXED_POSITION_TIMEOUT_SECONDS = 15
 FIXED_MAX_CONSECUTIVE_LOSSES = 5
 FIXED_MAX_DRAWDOWN_PCT = 15.0
 FIXED_REENTRY_DELAY_SECONDS = 0.0
 FIXED_STALE_MS = 500
-
 
 @dataclass(frozen=True)
 class Config:
