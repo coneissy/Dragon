@@ -74,6 +74,28 @@ def _leg_side(symbol: str, src: str, dst: str, symbol_meta: dict[str, tuple[str,
     return None
 
 
+def _top_input_liquidity(book: dict, side: str) -> Decimal:
+    levels = book.get("bids" if side == "sell" else "asks") or []
+    if not levels:
+        return D("0")
+    price = D(str(levels[0][0]))
+    qty = D(str(levels[0][1]))
+    if price <= 0 or qty <= 0:
+        return D("0")
+    # Liquidity must be expressed in the same asset/unit as the leg input.
+    return qty * price if side == "buy" else qty
+
+
+def _top_output(amount: Decimal, book: dict, side: str) -> Decimal:
+    levels = book.get("bids" if side == "sell" else "asks") or []
+    if not levels:
+        return D("0")
+    price = D(str(levels[0][0]))
+    if price <= 0 or amount <= 0:
+        return D("0")
+    return amount / price if side == "buy" else amount * price
+
+
 def extreme_golden_score(*, net_edge_bps: Decimal, liquidity_factor: Decimal, persistence_factor: Decimal) -> Decimal:
     """Dragon's extreme-golden ranking formula.
 
@@ -98,6 +120,7 @@ def classify_triangle(triangle, books: dict, symbol_meta: dict[str, tuple[str, s
         return TriangleUniverseDecision("D", False, False, D("0"), D("0"), D("0"), "NO_CAPITAL")
 
     liquidity_factors = []
+    input_amount = trade_notional
     for i, symbol in enumerate(triangle.symbols):
         book = books.get(symbol)
         if not book:
@@ -108,10 +131,13 @@ def classify_triangle(triangle, books: dict, symbol_meta: dict[str, tuple[str, s
         side = _leg_side(symbol, triangle.assets[i], triangle.assets[(i + 1) % 3], symbol_meta)
         if side is None:
             return TriangleUniverseDecision("D", False, False, D("0"), D("0"), D("0"), "INVALID_LEG")
-        top_value = _top_value(book, side)
-        if top_value <= 0:
+        input_liquidity = _top_input_liquidity(book, side)
+        if input_liquidity <= 0:
             return TriangleUniverseDecision("D", False, False, D("0"), D("0"), D("0"), "NO_DEPTH")
-        liquidity_factors.append(min(D("1"), top_value / trade_notional))
+        liquidity_factors.append(min(D("1"), input_liquidity / input_amount))
+        input_amount = _top_output(input_amount, book, side)
+        if input_amount <= 0:
+            return TriangleUniverseDecision("D", False, False, D("0"), D("0"), D("0"), "NO_DEPTH")
 
     liquidity = min(liquidity_factors, default=D("0"))
     # Persistence is deliberately neutral until independently observed
