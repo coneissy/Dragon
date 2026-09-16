@@ -82,7 +82,8 @@ def _book(book: dict, side: str) -> list[tuple[D, D]]:
     return [(D(str(p)), D(str(q))) for p, q in (book.get(key) or []) if D(str(p)) > 0 and D(str(q)) > 0]
 
 
-def _consume(levels: list[tuple[D, D]], quantity: D) -> tuple[D, D]:
+def _consume_base(levels: list[tuple[D, D]], quantity: D) -> tuple[D, D]:
+    """Consume a base-asset quantity and return (VWAP, filled_base)."""
     if quantity <= 0:
         raise ValueError("quantity must be positive")
     remaining, value, filled = quantity, D("0"), D("0")
@@ -98,26 +99,48 @@ def _consume(levels: list[tuple[D, D]], quantity: D) -> tuple[D, D]:
     return value / filled, filled
 
 
+def _consume_quote(levels: list[tuple[D, D]], quote_budget: D) -> tuple[D, D, D]:
+    """Consume a quote-asset budget and return (base_received, quote_spent, VWAP)."""
+    if quote_budget <= 0:
+        raise ValueError("quote budget must be positive")
+    remaining, base_received, quote_spent = quote_budget, D("0"), D("0")
+    for price, available_base in levels:
+        level_quote = price * available_base
+        spend = min(remaining, level_quote)
+        base_received += spend / price
+        quote_spent += spend
+        remaining -= spend
+        if remaining <= 0:
+            break
+    if quote_spent <= 0 or remaining > 0:
+        raise ValueError("insufficient order-book depth")
+    return base_received, quote_spent, quote_spent / base_received
+
+
 def measure_leg(symbol: str, side: str, input_amount: D, book: dict, fee_bps: D) -> LegMeasurement:
-    if input_amount <= 0:
-        raise ValueError("input amount must be positive")
+    if input_amount <= 0 or fee_bps < 0:
+        raise ValueError("input amount and fee must be non-negative/positive")
     levels = _book(book, side)
     if not levels:
         raise ValueError("empty order book")
     best = levels[0][0]
+    fee_factor = D("1") - fee_bps / BPS
+    if fee_factor <= 0:
+        raise ValueError("fee is too large")
+
     if side == "buy":
-        base_qty = input_amount / best
-        vwap, _ = _consume(levels, base_qty)
-        gross_output = input_amount / vwap
-        fee_quote = input_amount * fee_bps / BPS
-        net_output = gross_output * (D("1") - fee_bps / BPS)
+        gross_output, quote_spent, vwap = _consume_quote(levels, input_amount)
+        fee_quote = quote_spent * fee_bps / BPS
+        net_output = gross_output * fee_factor
     elif side == "sell":
-        vwap, _ = _consume(levels, input_amount)
-        gross_output = input_amount * vwap
+        vwap, filled = _consume_base(levels, input_amount)
+        gross_output = filled * vwap
         fee_quote = gross_output * fee_bps / BPS
         net_output = gross_output - fee_quote
+        quote_spent = gross_output
     else:
         raise ValueError("side must be buy or sell")
+
     slip = max(D("0"), ((vwap - best) / best if side == "buy" else (best - vwap) / best) * BPS)
     return LegMeasurement(symbol, side, input_amount, gross_output, net_output, vwap, slip, fee_quote, slip)
 
