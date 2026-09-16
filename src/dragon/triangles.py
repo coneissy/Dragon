@@ -152,9 +152,9 @@ def _break_even_gross_bps(fee_bps: Decimal, legs: int = 3, safety_bps: Decimal =
 def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_meta=None, notional_usdt=1.0):
     """Evaluate a 3-leg triangle with executable depth and exactly one fee per leg.
 
-    Depth walking already captures market impact. It is therefore diagnostic only;
-    it must not be subtracted again as an extra slippage charge. The configured
-    slippage_bps value is treated only as a safety buffer.
+    The returned diagnostic object is the authoritative calculation trace used
+    by the engine. Depth walking captures market impact; configured slippage is
+    therefore a safety buffer rather than a second impact charge.
     """
     symbol_meta = symbol_meta or {}
     start = Decimal(str(notional_usdt))
@@ -171,6 +171,7 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
     top_amount = start
     legs = []
     total_fee_drag_bps = _three_leg_fee_drag_bps(fee_bps, len(t.symbols))
+    total_fee_equivalent = start * total_fee_drag_bps / Decimal("10000")
     total_depth_drag_bps = Decimal("0")
 
     for i, symbol in enumerate(t.symbols):
@@ -199,7 +200,6 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
         if any(x is None or x <= 0 for x in (gross_next, net_before_fee, top_net_output)):
             return None
 
-        # Fee is charged exactly once on the executable output of this leg.
         fee = net_before_fee * fee_bps / Decimal("10000")
         net_next = net_before_fee * fee_factor
         depth_drag_bps = max(Decimal("0"), (Decimal("1") - net_before_fee / top_net_output) * Decimal("10000"))
@@ -237,6 +237,8 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
     net_bps = net_pnl / start * Decimal("10000")
     break_even_gross_bps = _break_even_gross_bps(fee_bps, len(t.symbols), safety_bps)
     top_of_book_gross_bps = (top_amount / start - Decimal("1")) * Decimal("10000")
+    depth_adjusted_gross_bps = gross_bps
+    cost_to_break_even_bps = break_even_gross_bps - gross_bps
 
     return {
         "start_usdt": start,
@@ -244,11 +246,14 @@ def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_
         "gross_pnl_usdt": gross_pnl,
         "gross_bps": gross_bps,
         "top_of_book_gross_bps": top_of_book_gross_bps,
+        "depth_adjusted_gross_bps": depth_adjusted_gross_bps,
         "post_fee_final": net_amount,
         "net_pnl_before_safety_usdt": net_pnl_before_safety,
         "fee_bps_per_leg": fee_bps,
         "fee_drag_bps": total_fee_drag_bps,
+        "total_fee_equivalent": total_fee_equivalent,
         "break_even_gross_bps": break_even_gross_bps,
+        "cost_to_break_even_bps": cost_to_break_even_bps,
         "depth_drag_bps": total_depth_drag_bps,
         "safety_bps": safety_bps,
         "safety_cost_usdt": safety_cost,
