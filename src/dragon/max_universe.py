@@ -69,6 +69,24 @@ def _d(value: Any) -> Decimal:
     return Decimal(str(value))
 
 
+def _bps_factor(bps: Decimal) -> Decimal:
+    """Convert a non-negative bps cost to its multiplicative retention factor."""
+    if bps < 0:
+        raise ValueError("cost bps must be non-negative")
+    factor = Decimal("1") - bps / Decimal("10000")
+    if factor <= 0:
+        raise ValueError("cost bps must be below 10000")
+    return factor
+
+
+def _compound_cost_bps(*costs: Decimal) -> Decimal:
+    """Return exact compounded cost drag for independent percentage costs."""
+    factor = Decimal("1")
+    for cost in costs:
+        factor *= _bps_factor(cost)
+    return (Decimal("1") - factor) * Decimal("10000")
+
+
 def _tier(score: Decimal, tiers: Mapping[str, Any]) -> tuple[str, Decimal]:
     ordered = sorted(
         ((k, _d(v)) for k, v in tiers.items() if k != "reject_below"),
@@ -142,12 +160,26 @@ def evaluate_cross_exchange(
 
     ask = _d(buy_ask)
     bid = _d(sell_bid)
+    buy_fee = _d(buy_fee_bps)
+    sell_fee = _d(sell_fee_bps)
+    slippage = _d(slippage_bps)
+    latency = _d(latency_penalty_bps)
     if ask <= 0 or bid <= 0:
         raise ValueError("buy_ask and sell_bid must be positive")
 
-    gross = (bid / ask - Decimal("1")) * Decimal("10000")
-    fee = _d(buy_fee_bps) + _d(sell_fee_bps)
-    net = gross - fee - _d(slippage_bps) - _d(latency_penalty_bps)
+    # Opportunity edge is multiplicative, not an additive subtraction of bps.
+    # The trade starts with ask and ends at bid, then each independent cost is
+    # applied once as a retention factor. This avoids overstating net edge by
+    # mixing percentage ratios with linear bps arithmetic.
+    gross_factor = bid / ask
+    fee_factor = _bps_factor(buy_fee) * _bps_factor(sell_fee)
+    slippage_factor = _bps_factor(slippage)
+    latency_factor = _bps_factor(latency)
+    net_factor = gross_factor * fee_factor * slippage_factor * latency_factor
+
+    gross = (gross_factor - Decimal("1")) * Decimal("10000")
+    fee = _compound_cost_bps(buy_fee, sell_fee)
+    net = (net_factor - Decimal("1")) * Decimal("10000")
     notional = max(Decimal("0"), _d(executable_notional_usdt))
 
     score, tier, _ = score_opportunity(
@@ -194,8 +226,8 @@ def evaluate_cross_exchange(
         sell_venue=sell_venue,
         gross_edge_bps=gross,
         fee_bps=fee,
-        slippage_bps=_d(slippage_bps),
-        latency_penalty_bps=_d(latency_penalty_bps),
+        slippage_bps=slippage,
+        latency_penalty_bps=latency,
         net_edge_bps=net,
         executable_notional_usdt=executable,
         expected_profit_usdt=expected,
