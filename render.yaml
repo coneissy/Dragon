@@ -19,11 +19,11 @@ services:
       - key: BINANCE_WS_BASE
         value: wss://stream.binance.com:9443/ws
       - key: DRY_RUN
-        value: "false"
+        value: "true"
       - key: LIVE_TRADING
-        value: "true"
+        value: "false"
       - key: FUTURES_ENABLED
-        value: "true"
+        value: "false"
       - key: FUTURES_LIVE_TRADING
         value: "false"
       - key: FUTURES_MIN_NET_EDGE_BPS
@@ -41,15 +41,15 @@ services:
       - key: FUTURES_ORDER_NOTIONAL_USDT
         value: "5"
       - key: MIN_NET_EDGE_BPS
-        value: "8"
+        value: "2"
       - key: MIN_EXPECTED_PROFIT_USDT
         value: "0.01"
       - key: MIN_TRADE_NOTIONAL_USDT
         value: "5"
       - key: MAX_NOTIONAL_USDT
-        value: "25"
+        value: "5"
       - key: MAX_SLIPPAGE_BPS
-        value: "2"
+        value: "15"
       - key: FEE_BPS
         value: "10"
       - key: ARB_RISK_PCT
@@ -61,7 +61,7 @@ services:
       - key: STREAM_SYMBOL_CAP
         value: "0"
       - key: STALE_MS
-        value: "750"
+        value: "1000"
       - key: POLL_INTERVAL_SECONDS
         value: "0.05"
       - key: ORDER_TIMEOUT_MS
