@@ -68,3 +68,20 @@ def test_three_leg_fee_15_bps_is_exactly_compounded():
     assert outcome["fee_drag_bps"] == expected_drag
     assert Decimal("44.9") < outcome["fee_drag_bps"] < Decimal("45.0")
     assert all(leg["fee_bps"] == "15" for leg in outcome["legs"])
+
+
+def test_diagnostics_expose_break_even_and_fee_equivalent():
+    t = Triangle(("ETHUSDT", "ETHBTC", "BTCUSDT"), ("USDT", "ETH", "BTC"))
+    books = {
+        "ETHUSDT": {"bids": [[100, 5]], "asks": [[100, 5]], "ts": 1},
+        "ETHBTC": {"bids": [[0.01, 5]], "asks": [[0.01, 5]], "ts": 1},
+        "BTCUSDT": {"bids": [[10000, 5]], "asks": [[10000, 5]], "ts": 1},
+    }
+    outcome = evaluate_triangle_outcome(t, books, fee_bps=15, slippage_bps=5, notional_usdt=10)
+    assert outcome is not None
+    assert outcome["total_fee_equivalent"] > 0
+    assert outcome["break_even_gross_bps"] > outcome["fee_drag_bps"]
+    assert outcome["cost_to_break_even_bps"] == outcome["break_even_gross_bps"] - outcome["gross_bps"]
+    assert "depth_adjusted_gross_bps" in outcome
+    assert len(outcome["legs"]) == 3
+    assert all("depth_drag_bps" in leg and "top_price" in leg for leg in outcome["legs"])
