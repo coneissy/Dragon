@@ -101,25 +101,30 @@ async def run():
                     if not ft or not st or not mark:
                         continue
                     try:
+                        # Preserve the observed signed funding rate. The buffer is
+                        # applied separately as a direction-independent edge haircut.
                         funding = Decimal(str(mark.get("lastFundingRate", "0"))) * Decimal("10000")
                         rows.append({
                             "symbol": symbol,
                             "spotBid": st["bidPrice"], "spotAsk": st["askPrice"],
                             "futuresBid": ft["bidPrice"], "futuresAsk": ft["askPrice"],
-                            # Buffer is included before evaluation as a conservative forward cost.
-                            "fundingBps": str(funding + funding_buffer),
+                            "fundingBps": str(funding),
                         })
                     except (KeyError, ValueError, ArithmeticError):
                         continue
 
-                opportunities = evaluate_basis(rows, fee_bps, min_edge, slippage_bps)
+                # evaluate_basis applies direction-specific funding correctly.
+                # Requiring min_edge + buffer is equivalent to subtracting the
+                # buffer from the resulting net edge, without changing funding sign.
+                opportunities = evaluate_basis(rows, fee_bps, min_edge + funding_buffer, slippage_bps)
                 for symbol, edge, direction in opportunities[:50]:
                     row = next((r for r in rows if r["symbol"] == symbol), None)
                     if not row:
                         continue
-                    web_runner.event("FUTURES_OPPORTUNITY", f"{symbol} direction={direction} net={edge:.3f}bps funding={Decimal(str(row['fundingBps'])):.3f}bps live={live} execution=SIMULATED")
+                    net_after_buffer = edge - funding_buffer
+                    web_runner.event("FUTURES_OPPORTUNITY", f"{symbol} direction={direction} net_after_buffer={net_after_buffer:.3f}bps observed_funding={Decimal(str(row['fundingBps'])):.3f}bps funding_buffer={funding_buffer:.3f}bps live={live} execution=SIMULATED")
                     if live:
-                        web_runner.event("FUTURES_BLOCKED", f"{symbol} live execution intentionally disabled by validator; positive edge={edge:.3f}bps direction={direction}")
+                        web_runner.event("FUTURES_BLOCKED", f"{symbol} live execution intentionally disabled by validator; positive edge={net_after_buffer:.3f}bps direction={direction}")
 
                 with web_runner.LOCK:
                     web_runner.STATE["futures_scans"] += 1
