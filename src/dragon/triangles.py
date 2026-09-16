@@ -28,15 +28,11 @@ def build_triangles(exchange_info: dict, max_triangles: int = 5000):
     seen = set()
     unlimited = max_triangles <= 0
     for a, b in combinations(usdt_assets, 2):
-        if a in excluded or b in excluded:
-            continue
         a_usdt = markets.get((a, "USDT"))
         b_usdt = markets.get((b, "USDT"))
         if not a_usdt or not b_usdt:
             continue
         for first, second in ((a, b), (b, a)):
-            if first in excluded or second in excluded:
-                continue
             cross = markets.get((first, second))
             if not cross:
                 continue
@@ -114,8 +110,13 @@ def _dynamic_safety_bps(t: Triangle, books: dict, symbol_meta: dict, start: Deci
         qty = Decimal(str(levels[0][1]))
         if price <= 0 or qty <= 0:
             return cap
-        top_value = qty * price
-        ratios.append(amount / top_value if top_value > 0 else Decimal("999"))
+        # Compare input liquidity in the same unit as the input amount.
+        # For BUY, the top-level quote value is qty * price. For SELL, the
+        # available input is base qty directly. The previous implementation
+        # compared SELL base quantity against quote notional, producing a
+        # dimensionally invalid liquidity ratio and excessive safety drag.
+        input_liquidity = qty * price if side == "buy" else qty
+        ratios.append(amount / input_liquidity if input_liquidity > 0 else Decimal("999"))
         out = _walk(symbol, side, amount, books)
         if out is None:
             return cap
@@ -133,13 +134,6 @@ def _dynamic_safety_bps(t: Triangle, books: dict, symbol_meta: dict, start: Deci
 
 
 def evaluate_triangle_outcome(t: Triangle, books, fee_bps, slippage_bps, symbol_meta=None, notional_usdt=1.0):
-    """Project a three-leg execution from live depth.
-
-    Quantities are propagated leg-to-leg. Each leg pays the supplied taker fee.
-    The projection is deliberately conservative and is not an execution fill
-    guarantee. The executor remains authoritative for actual commission and
-    exchange filter behavior.
-    """
     symbol_meta = symbol_meta or {}
     start = Decimal(str(notional_usdt))
     if start <= 0 or len(t.symbols) != 3:
