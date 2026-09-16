@@ -18,28 +18,11 @@ services:
         value: https://api.binance.com
       - key: BINANCE_WS_BASE
         value: wss://stream.binance.com:9443/ws
+      # Safe default: the new single engine must pass runtime checks before live orders.
       - key: DRY_RUN
         value: "true"
       - key: LIVE_TRADING
         value: "false"
-      - key: FUTURES_ENABLED
-        value: "true"
-      - key: FUTURES_LIVE_TRADING
-        value: "false"
-      - key: FUTURES_MIN_NET_EDGE_BPS
-        value: "3"
-      - key: FUTURES_FEE_BPS
-        value: "4"
-      - key: FUTURES_FUNDING_BUFFER_BPS
-        value: "3"
-      - key: FUTURES_SLIPPAGE_BPS
-        value: "3"
-      - key: FUTURES_POLL_SECONDS
-        value: "1"
-      - key: FUTURES_MAX_NOTIONAL_USDT
-        value: "0"
-      - key: FUTURES_ORDER_NOTIONAL_USDT
-        value: "0"
       - key: MIN_NET_EDGE_BPS
         value: "3"
       - key: MIN_EXPECTED_PROFIT_USDT
@@ -52,8 +35,6 @@ services:
         value: "3"
       - key: FEE_BPS
         value: "10"
-      - key: ARB_RISK_PCT
-        value: "0.0015"
       - key: ARB_CAPITAL_ALLOCATION_PCT
         value: "0.95"
       - key: ARB_SAFETY_RESERVE_USDT
@@ -62,14 +43,10 @@ services:
         value: "0"
       - key: MAX_TRIANGLES
         value: "0"
-      - key: STREAM_SYMBOL_CAP
-        value: "0"
+      - key: MAX_WS_SYMBOLS
+        value: "300"
       - key: STALE_MS
         value: "500"
-      - key: POLL_INTERVAL_SECONDS
-        value: "0.02"
-      - key: POSITION_TIMEOUT_SECONDS
-        value: "15"
       - key: MAX_CONSECUTIVE_LOSSES
         value: "5"
       - key: MAX_DRAWDOWN_PCT
@@ -79,8 +56,6 @@ services:
       - key: DEPTH_LEVELS
         value: "20"
       - key: HEALTH_FAIL_OPEN
-        value: "false"
-      - key: DEX_ENABLED
         value: "false"
       - key: LEDGER_PATH
         value: /tmp/dragon_ledger.sqlite3
