@@ -68,14 +68,7 @@ class DynamicFee:
         self._lock = Lock()
 
     def refresh(self, client):
-        """Load the authenticated taker fee directly from Binance's fee endpoint.
-
-        Do not rely on BinanceClient.account() to expose commissionRates because
-        that method intentionally treats fee lookup as optional and may return a
-        successful account response even when the fee request failed. Direct
-        retrieval makes the failure observable and prevents stale/implicit fee
-        assumptions from entering the scanner.
-        """
+        """Load the authenticated taker fee directly from Binance's fee endpoint."""
         try:
             rows = client.trade_fee()
             if not isinstance(rows, list) or not rows:
@@ -90,8 +83,6 @@ class DynamicFee:
                 if taker is None:
                     continue
                 value = Decimal(str(taker))
-                # Binance returns the commission rate as a fraction, e.g. 0.001.
-                # Reject malformed or negative values rather than silently using them.
                 if value < 0 or value > Decimal("1"):
                     continue
                 takers.append(value * Decimal("10000"))
@@ -112,7 +103,6 @@ class DynamicFee:
 
 
 def _fee_cost_bps(fee_bps: Decimal, legs: int = 3) -> Decimal:
-    """Return compounded taker-fee drag in basis points for a multi-leg path."""
     fee_factor = Decimal("1") - fee_bps / Decimal("10000")
     if fee_factor <= 0 or legs <= 0:
         return Decimal("0")
@@ -153,6 +143,55 @@ def install(main):
             counter[reason] += 1
             main.STATE["rejection_total"] = sum(counter.values())
 
+    def _publish_fee(client, value, source, error=None):
+        fee_cost = _fee_cost_bps(Decimal(str(value)), 3)
+        with main.LOCK:
+            main.STATE["dynamic_fee_bps"] = float(value)
+            main.STATE["fee_cost_bps"] = float(fee_cost)
+            main.STATE["fee_source"] = source
+            main.STATE["fee_error"] = error
+            main.STATE["last_fee_refresh"] = time.time()
+        main.event("FEE", f"Fee source={source}; taker={Decimal(str(value)):.4f} bps; 3-leg cost={fee_cost:.4f} bps" + (f"; error={error}" if error else ""))
+
+    # The full-universe runner can replace the stream-loop seam. Publish the
+    # authenticated fee when the Binance account endpoint is called as well,
+    # so the authoritative scanner state cannot silently remain on fallback.
+    try:
+        from src.dragon.binance import BinanceClient
+        original_account_method = BinanceClient.account
+        if not getattr(BinanceClient.account, "_dragon_fee_observed", False):
+            def observed_account(client, *args, **kwargs):
+                account = original_account_method(client, *args, **kwargs)
+                try:
+                    rows = client.trade_fee()
+                    takers = []
+                    for row in rows if isinstance(rows, list) else []:
+                        if not isinstance(row, dict):
+                            continue
+                        raw = row.get("takerCommission", row.get("taker"))
+                        if raw is None:
+                            continue
+                        rate = Decimal(str(raw))
+                        if 0 <= rate <= Decimal("1"):
+                            takers.append(rate * Decimal("10000"))
+                    if not takers:
+                        raise RuntimeError("no valid taker rate returned")
+                    value = max(takers)
+                    fee.bps = value
+                    fee.updated_at = time.time()
+                    fee.source = "authenticated_trade_fee"
+                    fee.last_error = None
+                    _publish_fee(client, value, fee.source)
+                except Exception as exc:
+                    fee.last_error = str(exc)[:300]
+                    fee.source = "configured_fallback"
+                    _publish_fee(client, fee.bps, fee.source, fee.last_error)
+                return account
+            observed_account._dragon_fee_observed = True
+            BinanceClient.account = observed_account
+    except Exception as exc:
+        main.event("FEE", f"Fee observer installation failed: {exc}")
+
     def diagnostic_eval(t, books, fee_bps, slippage_bps, symbol_meta=None, notional_usdt=1.0):
         cfg = context["cfg"]
         if not all(s in books for s in t.symbols):
@@ -165,7 +204,6 @@ def install(main):
         if not all(books.get(s, {}).get("bids") and books.get(s, {}).get("asks") for s in t.symbols):
             record("NO_LIQUIDITY")
             return None
-
         effective_fee = fee.bps if fee.updated_at else Decimal(str(fee_bps))
         fee_cost = _fee_cost_bps(effective_fee, len(t.symbols))
         with main.LOCK:
@@ -173,7 +211,6 @@ def install(main):
             main.STATE["fee_cost_bps"] = float(fee_cost)
             main.STATE["fee_source"] = fee.source if fee.updated_at else "configured_fallback"
             main.STATE["fee_error"] = fee.last_error
-
         depth_only = original_eval(t, books, Decimal("0"), Decimal("0"), symbol_meta, notional_usdt)
         if depth_only is None:
             record("NO_LIQUIDITY")
@@ -186,11 +223,9 @@ def install(main):
         if result is None:
             record("NO_LIQUIDITY")
             return None
-
         depth_edge_bps = depth_only[0]
         after_fee_edge_bps = after_fee[0]
         final_net_bps = result[0]
-
         if depth_edge_bps <= 0:
             record("NO_EDGE")
         elif after_fee_edge_bps <= 0:
@@ -232,30 +267,14 @@ def install(main):
         context["cfg"] = cfg
         fee.fallback = Decimal(str(cfg.fee_bps))
         value = await asyncio.to_thread(fee.refresh, client)
-        fee_cost = _fee_cost_bps(value, 3)
-        with main.LOCK:
-            main.STATE["dynamic_fee_bps"] = float(value)
-            main.STATE["fee_cost_bps"] = float(fee_cost)
-            main.STATE["fee_source"] = fee.source
-            main.STATE["fee_error"] = fee.last_error
-            main.STATE["last_fee_refresh"] = time.time()
-        if fee.updated_at:
-            main.event("FEE", f"Authenticated Binance taker fee loaded: {value:.4f} bps; 3-leg cost={fee_cost:.4f} bps")
-        else:
-            main.event("FEE", f"Authenticated fee unavailable; using configured fallback={value:.4f} bps; error={fee.last_error}")
+        source = fee.source if fee.updated_at else "configured_fallback"
+        _publish_fee(client, value, source, fee.last_error)
 
         async def fee_loop():
             while True:
                 await asyncio.sleep(float(os.getenv("FEE_REFRESH_SECONDS", "60")))
                 value = await asyncio.to_thread(fee.refresh, client)
-                fee_cost = _fee_cost_bps(value, 3)
-                with main.LOCK:
-                    main.STATE["dynamic_fee_bps"] = float(value)
-                    main.STATE["fee_cost_bps"] = float(fee_cost)
-                    main.STATE["fee_source"] = fee.source
-                    main.STATE["fee_error"] = fee.last_error
-                    main.STATE["last_fee_refresh"] = time.time()
-                main.event("FEE", f"Fee refresh source={fee.source}; taker={value:.4f} bps; 3-leg cost={fee_cost:.4f} bps" + (f"; error={fee.last_error}" if fee.last_error else ""))
+                _publish_fee(client, value, fee.source, fee.last_error)
 
         task = asyncio.create_task(fee_loop())
         try:
