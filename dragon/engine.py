@@ -9,7 +9,7 @@ async def run_production():
     os.environ.setdefault("PORT", "10000")
 
     import web_runner
-    from full_universe_runner import full_universe_stream_loop
+    from full_universe_runner_v3 import full_universe_stream_loop
     from src.dragon.binance import BinanceClient
     from src.dragon.config import Config
     from src.dragon.ledger import Ledger
@@ -19,13 +19,9 @@ async def run_production():
     dashboard_path = Path(__file__).resolve().parent.parent / "dashboard.html"
 
     def robust_get(self):
-        """Serve the dashboard reliably, including query strings such as ?utm_source=... ."""
         raw_path = self.path or "/"
         normalized = urlsplit(raw_path).path or "/"
-
         if normalized in ("/dashboard", "/dashboard/"):
-            # Prefer the repository dashboard, but fall back to the embedded
-            # dashboard so a missing/mis-mounted dashboard.html can never cause 404.
             if dashboard_path.is_file():
                 body = dashboard_path.read_bytes()
             else:
@@ -37,9 +33,6 @@ async def run_production():
             self.end_headers()
             self.wfile.write(body)
             return
-
-        # web_runner historically matched only exact paths. Normalize the path
-        # before delegating so /health?ts=... and similar requests remain valid.
         self.path = normalized
         try:
             return original_get(self)
@@ -74,10 +67,7 @@ async def run_production():
             account = client.account()
             with web_runner.LOCK:
                 web_runner.STATE["binance_authenticated"] = True
-            free = next(
-                (x.get("free", "0") for x in account.get("balances", []) if x.get("asset") == "USDT"),
-                "0",
-            )
+            free = next((x.get("free", "0") for x in account.get("balances", []) if x.get("asset") == "USDT"), "0")
             with web_runner.LOCK:
                 web_runner.STATE["free_usdt"] = str(free)
             web_runner.event("AUTH", "Binance API authenticated successfully", usdt_free=str(free))
@@ -95,23 +85,9 @@ async def run_production():
             web_runner.STATE["symbols"] = len(symbols)
             web_runner.STATE["market_streams"] = len(symbols)
 
-        web_runner.event(
-            "UNIVERSE",
-            f"FULL SPOT UNIVERSE active: triangles={len(triangles)} symbols={len(symbols)}",
-        )
-        web_runner.event(
-            "START",
-            f"Dragon full-universe engine ready; live={cfg.live_trading and not cfg.dry_run}",
-        )
-
-        await full_universe_stream_loop(
-            cfg,
-            client,
-            filters,
-            triangles,
-            symbols,
-            symbol_meta,
-        )
+        web_runner.event("UNIVERSE", f"FULL SPOT UNIVERSE active: triangles={len(triangles)} symbols={len(symbols)}")
+        web_runner.event("START", f"Dragon full-universe engine ready; live={cfg.live_trading and not cfg.dry_run}")
+        await full_universe_stream_loop(cfg, client, filters, triangles, symbols, symbol_meta)
     finally:
         client.close()
 
