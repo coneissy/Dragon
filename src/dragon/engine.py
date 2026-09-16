@@ -3,6 +3,48 @@ import time
 from decimal import Decimal
 
 
+class _RateLimitedConnect:
+    """Async context/await wrapper that paces Binance control messages."""
+
+    def __init__(self, connect_factory, args, kwargs):
+        self._connect_factory = connect_factory
+        self._args = args
+        self._kwargs = kwargs
+        self._connection = None
+        self._last_control_send = 0.0
+
+    def __await__(self):
+        return self._wait().__await__()
+
+    async def _wait(self):
+        self._connection = await self._connect_factory(*self._args, **self._kwargs)
+        self._wrap_send()
+        return self._connection
+
+    async def __aenter__(self):
+        self._connection = await self._connect_factory(*self._args, **self._kwargs)
+        self._wrap_send()
+        return self._connection
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return await self._connection.__aexit__(exc_type, exc, tb)
+
+    def _wrap_send(self):
+        original_send = self._connection.send
+
+        async def paced_send(message):
+            is_control = isinstance(message, str) and '"method":"SUBSCRIBE"' in message
+            if is_control:
+                now = time.monotonic()
+                wait = 0.26 - (now - self._last_control_send)
+                if wait > 0:
+                    await asyncio.sleep(wait)
+                self._last_control_send = time.monotonic()
+            return await original_send(message)
+
+        self._connection.send = paced_send
+
+
 def main():
     from src.dragon import main as dragon_main
     from src.dragon.hardening import install
@@ -20,7 +62,7 @@ def main():
         kwargs["ping_interval"] = None
         kwargs["ping_timeout"] = 30
         kwargs["close_timeout"] = 5
-        return original_connect(*args, **kwargs)
+        return _RateLimitedConnect(original_connect, args, kwargs)
 
     websockets.connect = resilient_connect
 
