@@ -14,7 +14,7 @@ from src.dragon.universe import classify_triangle
 
 WS_BACKOFF_MIN = 1.0
 WS_BACKOFF_MAX = 60.0
-WS_STALE_SECONDS = 30.0
+WS_STALE_SECONDS = 10.0
 WS_SHARD_SIZE = 100
 REST_FALLBACK_SECONDS = 3.0
 WS_SILENCE_SECONDS = 8.0
@@ -157,9 +157,10 @@ async def _rest_recovery_worker(client, symbols, queue):
                 await asyncio.sleep(REST_FALLBACK_SECONDS)
                 continue
 
+            # BBO recovery is telemetry only. It must never masquerade as a
+            # depth book for arbitrage evaluation or execution approval.
             payload = await asyncio.to_thread(client.book_ticker)
             count = 0
-            now = time.monotonic() * 1000
             for row in payload if isinstance(payload, list) else []:
                 symbol = str(row.get("symbol", "")).upper()
                 if symbol not in wanted:
@@ -168,22 +169,14 @@ async def _rest_recovery_worker(client, symbols, queue):
                 ask, ask_qty = row.get("askPrice"), row.get("askQty")
                 if not all((bid, bid_qty, ask, ask_qty)):
                     continue
-                item = {
-                    "s": symbol,
-                    "b": [[str(bid), str(bid_qty)]],
-                    "a": [[str(ask), str(ask_qty)]],
-                    "_source": "rest_book_ticker_recovery",
-                }
-                if queue.full():
-                    break
-                queue.put_nowait(item)
                 count += 1
             with web_runner.LOCK:
                 web_runner.STATE["rest_fallback_updates"] = web_runner.STATE.get("rest_fallback_updates", 0) + count
                 web_runner.STATE["last_rest_market_update"] = time.time()
+                web_runner.STATE["rest_fallback_mode"] = "telemetry_only"
             web_runner.event(
                 "REST_FALLBACK",
-                f"Market-data recovery; BookTicker refreshed {count} symbols",
+                f"BBO recovery observed {count} symbols; telemetry only, arbitrage evaluation remains WS-depth-only",
                 symbols=count,
                 ws_connected_shards=connected,
                 ws_silent_seconds=round(time.time() - last_ws, 1) if last_ws else None,
@@ -210,11 +203,15 @@ def _record_book(item, books, dirty, by_symbol, cfg):
     if not bids or not asks:
         _metric("market_data_invalid")
         return
+    source = item.get("_source", "binance_ws_depth")
+    if source != "binance_ws_depth":
+        _metric("non_ws_books_rejected")
+        return
     books[symbol] = {
         "bids": bids,
         "asks": asks,
         "depth_ts": time.monotonic() * 1000,
-        "source": item.get("_source", "binance_ws_depth"),
+        "source": source,
     }
     dirty.update(by_symbol.get(symbol, ()))
     _metric("books_populated")
@@ -264,11 +261,13 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
             "analysis_blocks": 0,
             "balance_failures": 0,
             "budget_blocks": 0,
+            "non_ws_books_rejected": 0,
             "rest_fallback_updates": web_runner.STATE.get("rest_fallback_updates", 0),
+            "rest_fallback_mode": "telemetry_only",
         })
 
     web_runner.event("UNIVERSE", f"Full dynamic Spot universe active: {len(symbols)} symbols, {len(triangles)} triangles, {len(shards)} WS shards", shard_size=WS_SHARD_SIZE)
-    web_runner.event("SCAN", f"Scanner armed; WS + REST recovery; net-edge threshold={cfg.min_net_edge_bps:g}bps")
+    web_runner.event("SCAN", f"Scanner armed; WS-depth-only evaluation + BBO recovery telemetry; net-edge threshold={cfg.min_net_edge_bps:g}bps")
 
     last_balance = 0.0
     free_usdt = Decimal("0")
@@ -341,8 +340,8 @@ async def full_universe_stream_loop(cfg, client, filters, triangles, symbols, sy
             reasons = {}
             for idx in candidates:
                 triangle = triangles[idx]
-                if not all(s in books and now - books[s].get("depth_ts", 0) <= cfg.stale_ms for s in triangle.symbols):
-                    _metric("stale_triangle_skips")
+                if not all(s in books and books[s].get("source") == "binance_ws_depth" and now - books[s].get("depth_ts", 0) <= cfg.stale_ms for s in triangle.symbols):
+                    _metric("stale_or_non_ws_triangle_skips")
                     continue
                 _metric("evaluation_attempts")
                 result = web_runner.evaluate_triangle(
