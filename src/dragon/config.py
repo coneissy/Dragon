@@ -28,15 +28,13 @@ class Config:
     dry_run: bool = True
     live_trading: bool = False
     # Adaptive market layer. The fixed floor below prevents tuning under 2 bps.
-    min_net_edge_bps: float = FIXED_NET_EDGE_FLOOR_BPS
-    min_expected_profit_usdt: float = 0.001
+    min_net_edge_bps: float = 8.0
+    min_expected_profit_usdt: float = 0.01
     min_trade_notional_usdt: float = FIXED_MIN_TRADE_NOTIONAL_USDT
     max_notional_usdt: float = FIXED_MAX_NOTIONAL_USDT
     max_slippage_bps: float = 15.0
     fee_bps: float = 10.0
     risk_pct: float = 0.0015
-    # With the fixed $10 starting capital, $5 reserve, and $5 minimum trade,
-    # the default allocation must expose the full $5 deployable budget.
     capital_allocation_pct: float = 1.0
     safety_reserve_usdt: float = FIXED_SAFETY_RESERVE_USDT
     cooldown_ms: int = 1000
