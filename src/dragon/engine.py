@@ -151,17 +151,13 @@ def main():
     full_universe_runner_v3._feed_worker = repaired_feed_worker
     dragon_main.stream_loop = full_universe_runner_v3.full_universe_stream_loop
 
-    original_web_evaluate = web_runner.evaluate_triangle
-
     def hardened_web_evaluate(t, books, fee_bps, slippage_bps, symbol_meta=None, notional_usdt=1.0):
         with dragon_main.LOCK:
             dynamic_fee = dragon_main.STATE.get("dynamic_fee_bps")
         effective_fee = Decimal(str(dynamic_fee)) if dynamic_fee not in (None, "", 0, 0.0) else Decimal(str(fee_bps))
 
-        # Use the corrected depth-aware projection as the scanner's authoritative
-        # result. The previous implementation calculated a corrected projection
-        # for telemetry but then returned the legacy web_runner calculation,
-        # allowing the dashboard and gate to disagree with the displayed model.
+        # This executable-depth projection is authoritative for the scanner.
+        # It keeps the displayed model and the execution gate on the same math.
         outcome = evaluate_triangle_outcome(t, books, effective_fee, slippage_bps, symbol_meta, notional_usdt)
         if not outcome:
             with web_runner.LOCK:
@@ -177,6 +173,18 @@ def main():
             outcome["second_asset"],
         )
         with web_runner.LOCK:
+            diagnostics = web_runner.STATE.setdefault("calculation_diagnostics", {})
+            diagnostics["evaluations"] = diagnostics.get("evaluations", 0) + 1
+            diagnostics["last_update"] = time.time()
+            diagnostics["positive_gross"] = diagnostics.get("positive_gross", 0) + int(outcome["gross_bps"] > 0)
+            diagnostics["negative_gross"] = diagnostics.get("negative_gross", 0) + int(outcome["gross_bps"] <= 0)
+            diagnostics["positive_net"] = diagnostics.get("positive_net", 0) + int(outcome["net_bps"] > 0)
+            diagnostics["negative_net"] = diagnostics.get("negative_net", 0) + int(outcome["net_bps"] <= 0)
+            diagnostics["top_book_positive_executable_negative"] = diagnostics.get("top_book_positive_executable_negative", 0) + int(outcome["top_of_book_gross_bps"] > 0 and outcome["gross_bps"] <= 0)
+            diagnostics["gross_positive_net_negative"] = diagnostics.get("gross_positive_net_negative", 0) + int(outcome["gross_bps"] > 0 and outcome["net_bps"] <= 0)
+            diagnostics["fee_drag_bps"] = float(outcome["fee_drag_bps"])
+            diagnostics["break_even_gross_bps"] = float(outcome["break_even_gross_bps"])
+            diagnostics["last_path"] = list(outcome["path"])
             web_runner.STATE["last_projection"] = {
                 "ts": time.time(),
                 "path": list(outcome["path"]),
@@ -185,13 +193,17 @@ def main():
                 "gross_pnl_usdt": str(outcome["gross_pnl_usdt"]),
                 "gross_bps": float(outcome["gross_bps"]),
                 "top_of_book_gross_bps": float(outcome["top_of_book_gross_bps"]),
+                "depth_adjusted_gross_bps": float(outcome["depth_adjusted_gross_bps"]),
                 "post_fee_final": str(outcome["post_fee_final"]),
                 "net_pnl_before_safety_usdt": str(outcome["net_pnl_before_safety_usdt"]),
+                "fee_bps_per_leg": float(outcome["fee_bps_per_leg"]),
                 "fee_drag_bps": float(outcome["fee_drag_bps"]),
                 "total_fee_equivalent": str(outcome["total_fee_equivalent"]),
                 "depth_drag_bps": float(outcome["depth_drag_bps"]),
                 "safety_bps": float(outcome["safety_bps"]),
                 "safety_cost_usdt": str(outcome["safety_cost_usdt"]),
+                "break_even_gross_bps": float(outcome["break_even_gross_bps"]),
+                "cost_to_break_even_bps": float(outcome["cost_to_break_even_bps"]),
                 "final_usdt": str(outcome["final_usdt"]),
                 "net_pnl_usdt": str(outcome["net_pnl_usdt"]),
                 "net_bps": float(outcome["net_bps"]),
