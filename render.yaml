@@ -41,7 +41,9 @@ services:
       - key: FUTURES_ORDER_NOTIONAL_USDT
         value: "5"
       - key: MIN_NET_EDGE_BPS
-        value: "2"
+        value: "8"
+      - key: MIN_EXPECTED_PROFIT_USDT
+        value: "0.01"
       - key: MIN_TRADE_NOTIONAL_USDT
         value: "5"
       - key: MAX_NOTIONAL_USDT
