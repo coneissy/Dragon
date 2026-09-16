@@ -63,6 +63,8 @@ class DynamicFee:
         self.bps = Decimal(str(fallback_bps))
         self.fallback = Decimal(str(fallback_bps))
         self.updated_at = 0.0
+        self.source = "configured_fallback"
+        self.last_error = None
         self._lock = Lock()
 
     def refresh(self, client):
@@ -76,10 +78,15 @@ class DynamicFee:
                     with self._lock:
                         self.bps = value
                         self.updated_at = time.time()
+                        self.source = "authenticated_account"
+                        self.last_error = None
                     return value
-        except Exception:
-            pass
-        return self.bps
+            raise RuntimeError("authenticated account response contained no taker commissionRates")
+        except Exception as exc:
+            with self._lock:
+                self.last_error = str(exc)[:300]
+                self.source = "configured_fallback"
+            return self.bps
 
 
 def _fee_cost_bps(fee_bps: Decimal, legs: int = 3) -> Decimal:
@@ -95,7 +102,8 @@ def _ensure_state(main):
         "rejection": Counter(), "rejection_total": 0,
         "latency": {"count": 0, "avg_ms": 0.0, "p95_ms": 0.0, "max_ms": 0.0},
         "circuit_breaker_trips": 0, "dynamic_fee_bps": 0.0,
-        "fee_cost_bps": 0.0, "last_fee_refresh": None, "last_execution_latency_ms": None,
+        "fee_cost_bps": 0.0, "fee_source": "unknown", "fee_error": None,
+        "last_fee_refresh": None, "last_execution_latency_ms": None,
     }
     with main.LOCK:
         for key, value in defaults.items():
@@ -141,9 +149,9 @@ def install(main):
         with main.LOCK:
             main.STATE["dynamic_fee_bps"] = float(effective_fee)
             main.STATE["fee_cost_bps"] = float(fee_cost)
+            main.STATE["fee_source"] = fee.source if fee.updated_at else "configured_fallback"
+            main.STATE["fee_error"] = fee.last_error
 
-        # First pass is the true depth-only edge. Second pass isolates the
-        # compounded fee effect. Final pass adds the configured execution buffer.
         depth_only = original_eval(t, books, Decimal("0"), Decimal("0"), symbol_meta, notional_usdt)
         if depth_only is None:
             record("NO_LIQUIDITY")
@@ -161,7 +169,6 @@ def install(main):
         after_fee_edge_bps = after_fee[0]
         final_net_bps = result[0]
 
-        # Exactly one primary rejection reason is recorded per evaluated path.
         if depth_edge_bps <= 0:
             record("NO_EDGE")
         elif after_fee_edge_bps <= 0:
@@ -203,11 +210,17 @@ def install(main):
         context["cfg"] = cfg
         fee.fallback = Decimal(str(cfg.fee_bps))
         value = await asyncio.to_thread(fee.refresh, client)
+        fee_cost = _fee_cost_bps(value, 3)
         with main.LOCK:
             main.STATE["dynamic_fee_bps"] = float(value)
-            main.STATE["fee_cost_bps"] = float(_fee_cost_bps(value, 3))
+            main.STATE["fee_cost_bps"] = float(fee_cost)
+            main.STATE["fee_source"] = fee.source
+            main.STATE["fee_error"] = fee.last_error
             main.STATE["last_fee_refresh"] = time.time()
-        main.event("FEE", f"Dynamic Binance taker fee loaded: {value:.4f} bps; 3-leg cost={_fee_cost_bps(value, 3):.4f} bps")
+        if fee.updated_at:
+            main.event("FEE", f"Authenticated Binance taker fee loaded: {value:.4f} bps; 3-leg cost={fee_cost:.4f} bps")
+        else:
+            main.event("FEE", f"Authenticated fee unavailable; using configured fallback={value:.4f} bps; error={fee.last_error}")
 
         async def fee_loop():
             while True:
@@ -217,18 +230,10 @@ def install(main):
                 with main.LOCK:
                     main.STATE["dynamic_fee_bps"] = float(value)
                     main.STATE["fee_cost_bps"] = float(fee_cost)
+                    main.STATE["fee_source"] = fee.source
+                    main.STATE["fee_error"] = fee.last_error
                     main.STATE["last_fee_refresh"] = time.time()
-                    telemetry = {
-                        "depth_updates": main.STATE.get("depth_updates", 0),
-                        "scans": main.STATE.get("scans", 0),
-                        "opportunities": main.STATE.get("opportunities", 0),
-                        "executions": main.STATE.get("executions", 0),
-                        "balance_refreshes": main.STATE.get("balance_refreshes", 0),
-                        "free_usdt": main.STATE.get("free_usdt", "0"),
-                        "rejections": dict(main.STATE.get("rejection", {})),
-                    }
-                main.event("TELEMETRY", f"market={telemetry['depth_updates']} scans={telemetry['scans']} opp={telemetry['opportunities']} exec={telemetry['executions']} balance_refreshes={telemetry['balance_refreshes']} free_usdt={telemetry['free_usdt']} rejections={telemetry['rejections']}")
-                main.event("FEE", f"Dynamic Binance taker fee refreshed: {value:.4f} bps; 3-leg cost={fee_cost:.4f} bps")
+                main.event("FEE", f"Fee refresh source={fee.source}; taker={value:.4f} bps; 3-leg cost={fee_cost:.4f} bps" + (f"; error={fee.last_error}" if fee.last_error else ""))
 
         task = asyncio.create_task(fee_loop())
         try:
