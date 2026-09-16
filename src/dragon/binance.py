@@ -122,6 +122,25 @@ class BinanceClient:
     def book_ticker(self):
         return self.public("/api/v3/ticker/bookTicker")
 
+    def depth(self, symbol: str, limit: int = 20):
+        """Fetch a real multi-level Spot order-book snapshot for WS bootstrap/recovery."""
+        symbol = str(symbol).upper()
+        limit = max(5, min(100, int(limit)))
+        payload = self.public("/api/v3/depth", {"symbol": symbol, "limit": limit})
+        if not isinstance(payload, dict):
+            raise BinanceError(f"depth returned an unexpected payload for {symbol}")
+        bids = payload.get("bids") or []
+        asks = payload.get("asks") or []
+        if not bids or not asks:
+            raise BinanceError(f"depth returned an empty book for {symbol}")
+        return {
+            "s": symbol,
+            "b": [(str(p), str(q)) for p, q in bids[:limit] if Decimal(str(p)) > 0 and Decimal(str(q)) > 0],
+            "a": [(str(p), str(q)) for p, q in asks[:limit] if Decimal(str(p)) > 0 and Decimal(str(q)) > 0],
+            "lastUpdateId": payload.get("lastUpdateId"),
+            "_source": "binance_rest_depth_snapshot",
+        }
+
     def signed(self, method: str, path: str, params=None):
         if not self.key or not self.secret:
             raise BinanceError("Binance credentials missing")
@@ -210,9 +229,6 @@ class BinanceClient:
 
     def account(self):
         account = self.signed("GET", "/api/v3/account")
-        # hardening.DynamicFee consumes commissionRates. Populate it from the
-        # authenticated trade-fee endpoint and use the maximum taker rate as a
-        # conservative three-leg fee when symbol-specific rates differ.
         try:
             rows = self.trade_fee()
             max_taker = max((row["taker"] for row in rows), default=None)
