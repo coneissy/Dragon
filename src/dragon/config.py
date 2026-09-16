@@ -27,8 +27,8 @@ class Config:
     ws_base: str = "wss://stream.binance.com:9443/ws"
     dry_run: bool = True
     live_trading: bool = False
-    # Adaptive market layer. The fixed floor below prevents tuning under 2 bps.
-    min_net_edge_bps: float = 8.0
+    # Low discovery/execution threshold. Net edge is still calculated after costs.
+    min_net_edge_bps: float = 2.0
     min_expected_profit_usdt: float = 0.01
     min_trade_notional_usdt: float = FIXED_MIN_TRADE_NOTIONAL_USDT
     max_notional_usdt: float = FIXED_MAX_NOTIONAL_USDT
