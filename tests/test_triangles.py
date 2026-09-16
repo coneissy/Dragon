@@ -56,7 +56,6 @@ def test_fee_cost_scales_with_leg_count():
 
 
 def test_three_leg_fee_15_bps_is_exactly_compounded():
-    t = Triangle(("ETHUSDT", "ETHBTC", "BTCUSDT"), ("USDT", "BTC", "ETH"))
     t = Triangle(("ETHUSDT", "ETHBTC", "BTCUSDT"), ("USDT", "ETH", "BTC"))
     books = {
         "ETHUSDT": {"bids": [[100, 5]], "asks": [[100, 5]], "ts": 1},
