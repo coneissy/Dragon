@@ -8,7 +8,6 @@ class Config:
     ws_base: str = "wss://stream.binance.com:9443/ws"
     dry_run: bool = True
     live_trading: bool = False
-    # Scaling is centralized here so runtime modules do not read duplicate env values.
     max_platforms: int = 20
     max_symbols_per_platform: int = 10000
     max_ws_symbols: int = 300
@@ -28,6 +27,7 @@ class Config:
     order_timeout_ms: int = 5000
     max_consecutive_losses: int = 5
     max_drawdown_pct: float = 15.0
+    simulation_balance_usdt: float = 5.0
     ledger_path: str = "/tmp/dragon_ledger.sqlite3"
     health_fail_open: bool = False
 
@@ -43,10 +43,10 @@ class Config:
             ws_base=os.getenv("BINANCE_WS_BASE", cls.ws_base).strip().rstrip("/"),
             dry_run=cls._bool("DRY_RUN", cls.dry_run),
             live_trading=cls._bool("LIVE_TRADING", cls.live_trading),
-            max_platforms=max(1, int(os.getenv("MAX_PLATFORMS", cls.max_platforms))),
-            max_symbols_per_platform=max(1, min(10000, int(os.getenv("MAX_SYMBOLS_PER_PLATFORM", cls.max_symbols_per_platform))),
-            max_ws_symbols=max(1, min(10000, int(os.getenv("MAX_WS_SYMBOLS", cls.max_ws_symbols))),
-            ws_shard_size=max(1, min(100, int(os.getenv("WS_SHARD_SIZE", cls.ws_shard_size))),
+            max_platforms=max(1, min(20, int(os.getenv("MAX_PLATFORMS", cls.max_platforms)))),
+            max_symbols_per_platform=max(1, min(10000, int(os.getenv("MAX_SYMBOLS_PER_PLATFORM", cls.max_symbols_per_platform)))),
+            max_ws_symbols=max(1, min(10000, int(os.getenv("MAX_WS_SYMBOLS", cls.max_ws_symbols)))),
+            ws_shard_size=max(1, min(100, int(os.getenv("WS_SHARD_SIZE", cls.ws_shard_size)))),
             min_net_edge_bps=max(0.0, float(os.getenv("MIN_NET_EDGE_BPS", cls.min_net_edge_bps))),
             min_expected_profit_usdt=max(0.0, float(os.getenv("MIN_EXPECTED_PROFIT_USDT", cls.min_expected_profit_usdt))),
             min_trade_notional_usdt=max(0.0, float(os.getenv("MIN_TRADE_NOTIONAL_USDT", cls.min_trade_notional_usdt))),
@@ -62,6 +62,7 @@ class Config:
             order_timeout_ms=max(1000, int(os.getenv("ORDER_TIMEOUT_MS", cls.order_timeout_ms))),
             max_consecutive_losses=max(1, int(os.getenv("MAX_CONSECUTIVE_LOSSES", cls.max_consecutive_losses))),
             max_drawdown_pct=max(0.1, float(os.getenv("MAX_DRAWDOWN_PCT", cls.max_drawdown_pct))),
+            simulation_balance_usdt=max(0.0, float(os.getenv("SIMULATION_BALANCE_USDT", cls.simulation_balance_usdt))),
             ledger_path=os.getenv("LEDGER_PATH", cls.ledger_path),
             health_fail_open=cls._bool("HEALTH_FAIL_OPEN", cls.health_fail_open),
         )
@@ -87,3 +88,5 @@ class Config:
             raise ValueError("ARB_CAPITAL_ALLOCATION_PCT must be in (0,1]")
         if self.max_consecutive_losses <= 0 or self.max_drawdown_pct <= 0:
             raise ValueError("risk limits must be positive")
+        if self.simulation_balance_usdt < self.min_trade_notional_usdt and self.dry_run:
+            raise ValueError("SIMULATION_BALANCE_USDT must cover MIN_TRADE_NOTIONAL_USDT in dry-run mode")
