@@ -5,14 +5,56 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dragon-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+  DRY_RUN: "true"
+  LIVE_TRADING: "false"
 
 jobs:
   smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install -r requirements.txt
-      - run: python -m pytest -q tests/test_calculator.py tests/test_main.py tests/test_full_universe_runner_v3.py tests/test_triangles.py tests/test_risk.py
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Compile Python sources
+        run: python -m compileall -q .
+
+      - name: Validate YAML configuration
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+          for path in Path('.').rglob('*.yaml'):
+              yaml.safe_load(path.read_text(encoding='utf-8'))
+              print(f'validated {path}')
+          PY
+
+      - name: Enforce CI safety mode
+        run: |
+          test "$DRY_RUN" = "true"
+          test "$LIVE_TRADING" = "false"
+          ! grep -RInE 'LIVE_TRADING\s*=\s*true|DRY_RUN\s*=\s*false' --exclude-dir=.git --exclude='*.md' .
+
+      - name: Run test suite
+        run: python -m pytest -q
