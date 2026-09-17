@@ -94,26 +94,18 @@ class MarketData:
         return True
 
     async def bootstrap(self):
-        """Seed books from Binance REST so the scanner has a known-good baseline while WS warms up."""
+        """Seed books from Binance REST without blocking WebSocket warm-up."""
         sem = asyncio.Semaphore(12)
         timeout = httpx.Timeout(5.0, connect=3.0)
         limits = httpx.Limits(max_connections=16, max_keepalive_connections=8)
-
         async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
             async def fetch(symbol):
                 async with sem:
                     try:
-                        response = await client.get(
-                            self.api_base + "/api/v3/depth",
-                            params={"symbol": symbol, "limit": self.depth_levels},
-                        )
+                        response = await client.get(self.api_base + "/api/v3/depth", params={"symbol": symbol, "limit": self.depth_levels})
                         response.raise_for_status()
                         payload = response.json()
-                        if not self._update_rest_book({
-                            "s": symbol,
-                            "b": payload.get("bids") or [],
-                            "a": payload.get("asks") or [],
-                        }):
+                        if not self._update_rest_book({"s": symbol, "b": payload.get("bids") or [], "a": payload.get("asks") or []}):
                             self.bootstrap_failed += 1
                             return False
                         self.bootstrap_ok += 1
@@ -122,12 +114,8 @@ class MarketData:
                         self.bootstrap_failed += 1
                         print(f"DRAGON REST_BOOTSTRAP | symbol={symbol} error={exc!s}", flush=True)
                         return False
-
-            results = await asyncio.gather(*(fetch(symbol) for symbol in self.symbols), return_exceptions=False)
-        print(
-            f"DRAGON REST_BOOTSTRAP | ok={sum(bool(x) for x in results)} failed={self.bootstrap_failed} symbols={len(self.symbols)}",
-            flush=True,
-        )
+            results = await asyncio.gather(*(fetch(symbol) for symbol in self.symbols))
+        print(f"DRAGON REST_BOOTSTRAP | ok={sum(bool(x) for x in results)} failed={self.bootstrap_failed} symbols={len(self.symbols)}", flush=True)
 
     def fresh(self, symbol):
         book = self.books.get(symbol.upper())
@@ -158,32 +146,22 @@ class MarketData:
                 async with self._lock:
                     for symbol in symbols:
                         self.books.pop(symbol, None)
-                async with websockets.connect(
-                    self._url(symbols),
-                    ping_interval=10,
-                    ping_timeout=10,
-                    close_timeout=5,
-                    open_timeout=15,
-                    max_size=2**20,
-                    max_queue=8192,
-                    compression=None,
-                ) as ws:
+                async with websockets.connect(self._url(symbols), ping_interval=10, ping_timeout=10, close_timeout=5, open_timeout=15, max_size=2**20, max_queue=8192, compression=None) as ws:
                     async with self._lock:
                         self.connected_shards += 1
-                        self.connected = self.connected_shards > 0
+                        self.connected = True
                     attempt = 0
                     print(f"DRAGON WS | shard={shard_id} connected symbols={len(symbols)} connected_shards={self.connected_shards}/{self.total_shards} depth={self.depth_levels}", flush=True)
                     async for raw in ws:
                         self.ws_messages += 1
                         try:
                             payload = json.loads(raw)
+                            data = payload.get("data", payload) if isinstance(payload, dict) else {}
                             if shard_id not in self._logged_first_message:
                                 self._logged_first_message.add(shard_id)
-                                data = payload.get("data", payload) if isinstance(payload, dict) else {}
                                 print(f"DRAGON WS_MSG | shard={shard_id} first_message event={data.get('e', '?')} symbol={data.get('s', '?')}", flush=True)
                             if self.update_from_payload(payload) and shard_id not in self._logged_first_snapshot:
                                 self._logged_first_snapshot.add(shard_id)
-                                data = payload.get("data", payload) if isinstance(payload, dict) else {}
                                 print(f"DRAGON WS_DEPTH | shard={shard_id} first valid snapshot symbol={data.get('s', '?')} updates={self.valid_updates}", flush=True)
                         except Exception as exc:
                             self.invalid_messages += 1
@@ -208,11 +186,12 @@ class MarketData:
     async def run(self):
         if not self.symbols:
             raise RuntimeError("no Binance symbols selected for market data")
-        await self.bootstrap()
         shards = self._shards()
         self.total_shards = len(shards)
         tasks = [asyncio.create_task(self._run_shard(i + 1, shard)) for i, shard in enumerate(shards)]
         try:
+            await asyncio.sleep(0)
+            await self.bootstrap()
             await asyncio.gather(*tasks)
         finally:
             for task in tasks:
