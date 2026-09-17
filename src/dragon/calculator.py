@@ -41,8 +41,17 @@ class Calculation:
         return self.net_pnl_usdt > ZERO
 
 
-def _fee_factor(fee_bps: Decimal) -> Decimal:
-    return ONE - fee_bps / BPS
+def _fee_factors(fee_bps) -> tuple[Decimal, Decimal, Decimal]:
+    if isinstance(fee_bps, (tuple, list)):
+        if len(fee_bps) != 3:
+            raise ValueError("three leg fees are required")
+        rates = tuple(Decimal(str(x)) for x in fee_bps)
+    else:
+        rate = Decimal(str(fee_bps))
+        rates = (rate, rate, rate)
+    if any(rate < ZERO or rate >= BPS for rate in rates):
+        raise ValueError("each fee_bps must be in [0, 10000)")
+    return tuple(ONE - rate / BPS for rate in rates)
 
 
 def _levels(book: dict, side: str):
@@ -114,13 +123,17 @@ def _safety_bps(path, assets, books, symbol_meta, start, cap_bps):
 
 
 def calculate(path, assets, books, symbol_meta, start_usdt, fee_bps, safety_cap_bps):
-    """Authoritative three-leg calculation using actual depth and one fee per leg."""
+    """Authoritative three-leg calculation with an independent fee on each leg.
+
+    A scalar fee remains supported for backward compatibility and is applied to
+    all three legs. Production configuration should pass a 3-item fee tuple.
+    """
     start = Decimal(str(start_usdt))
-    fee = Decimal(str(fee_bps))
-    if len(path) != 3 or len(assets) != 3 or start <= ZERO or fee < ZERO:
+    if len(path) != 3 or len(assets) != 3 or start <= ZERO:
         return None
-    factor = _fee_factor(fee)
-    if factor <= ZERO:
+    try:
+        factors = _fee_factors(fee_bps)
+    except (TypeError, ValueError, ArithmeticError):
         return None
 
     net_amount = start
@@ -147,10 +160,11 @@ def calculate(path, assets, books, symbol_meta, start_usdt, fee_bps, safety_cap_
         if min(net_before, gross_before, top_before) <= ZERO:
             return None
 
-        leg_fee = net_before * fee / BPS
-        net_after = net_before * factor
+        leg_fee = net_before * (ONE - factors[i])
+        net_after = net_before * factors[i]
         leg_depth_drag = max(ZERO, (top_before - gross_before) / top_amount * BPS)
-        legs.append(LegResult(symbol, side, assets[i], assets[(i + 1) % 3], net_amount, net_before, net_after, leg_fee, top_before, leg_depth_drag))
+        legs.append(LegResult(symbol, side, assets[i], assets[(i + 1) % 3], net_amount,
+                              net_before, net_after, leg_fee, top_before, leg_depth_drag))
         net_amount = net_after
         gross_amount = gross_before
         top_amount = top_before
@@ -163,13 +177,12 @@ def calculate(path, assets, books, symbol_meta, start_usdt, fee_bps, safety_cap_
     gross_bps = gross_pnl / start * BPS
     net_bps = net_pnl / start * BPS
 
-    # Fee drag is the exact compounded loss of three identical fee factors.
-    fee_drag = (ONE - factor ** 3) * BPS
-    # Depth drag compares executable depth-walked output with top-of-book output.
+    fee_factor = factors[0] * factors[1] * factors[2]
+    fee_drag = (ONE - fee_factor) * BPS
     depth_drag = max(ZERO, (top_amount - gross_amount) / top_amount * BPS)
 
     depth_factor = gross_amount / top_amount if top_amount > ZERO else ZERO
-    cost_factor = depth_factor * (factor ** 3) * safety_factor
+    cost_factor = depth_factor * fee_factor * safety_factor
     break_even = (ONE / cost_factor - ONE) * BPS if cost_factor > ZERO else ZERO
     break_even = max(ZERO, break_even)
 
