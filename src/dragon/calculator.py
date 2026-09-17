@@ -173,12 +173,17 @@ def calculate(path, assets, books, symbol_meta, start_usdt, fee_bps, safety_cap_
     fee_drag = fee_total / start * BPS
     depth_drag = max(ZERO, (top_amount - gross_amount) / start * BPS)
 
-    # Required gross edge at top-of-book to cover the actual depth multiplier,
-    # three leg fees and the explicit safety haircut. Unlike the old formula,
-    # this remains positive when the observed opportunity itself is profitable.
+    # Break-even is the gross edge required before depth, fees and safety.
+    # It is independent of the observed triangle's gross return.  The
+    # executable net multiplier after costs is C = D * F^3 * S, where D is
+    # the depth-retention factor, F the per-leg fee factor, and S the safety
+    # factor.  A top-of-book gross multiplier G breaks even when G*C = 1.
+    # Therefore BE = (1/C - 1) * 10000 bps.
     depth_factor = gross_amount / top_amount if top_amount > ZERO else ZERO
     cost_factor = depth_factor * (factor ** 3) * safety_factor
     break_even = (ONE / cost_factor - ONE) * BPS if cost_factor > ZERO else ZERO
+    if break_even < ZERO:
+        break_even = ZERO
 
     return Calculation(tuple(path), tuple(assets), start, final, gross_pnl, net_pnl,
                        gross_bps, net_bps, fee_drag, depth_drag, safety,
