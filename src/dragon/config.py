@@ -8,6 +8,11 @@ class Config:
     ws_base: str = "wss://stream.binance.com:9443/ws"
     dry_run: bool = True
     live_trading: bool = False
+    # Scaling is centralized here so runtime modules do not read duplicate env values.
+    max_platforms: int = 20
+    max_symbols_per_platform: int = 10000
+    max_ws_symbols: int = 300
+    ws_shard_size: int = 40
     min_net_edge_bps: float = 3.0
     min_expected_profit_usdt: float = 0.0
     min_trade_notional_usdt: float = 5.0
@@ -38,6 +43,10 @@ class Config:
             ws_base=os.getenv("BINANCE_WS_BASE", cls.ws_base).strip().rstrip("/"),
             dry_run=cls._bool("DRY_RUN", cls.dry_run),
             live_trading=cls._bool("LIVE_TRADING", cls.live_trading),
+            max_platforms=max(1, int(os.getenv("MAX_PLATFORMS", cls.max_platforms))),
+            max_symbols_per_platform=max(1, min(10000, int(os.getenv("MAX_SYMBOLS_PER_PLATFORM", cls.max_symbols_per_platform))),
+            max_ws_symbols=max(1, min(10000, int(os.getenv("MAX_WS_SYMBOLS", cls.max_ws_symbols))),
+            ws_shard_size=max(1, min(100, int(os.getenv("WS_SHARD_SIZE", cls.ws_shard_size))),
             min_net_edge_bps=max(0.0, float(os.getenv("MIN_NET_EDGE_BPS", cls.min_net_edge_bps))),
             min_expected_profit_usdt=max(0.0, float(os.getenv("MIN_EXPECTED_PROFIT_USDT", cls.min_expected_profit_usdt))),
             min_trade_notional_usdt=max(0.0, float(os.getenv("MIN_TRADE_NOTIONAL_USDT", cls.min_trade_notional_usdt))),
@@ -64,6 +73,12 @@ class Config:
             raise ValueError("BINANCE_WS_BASE must be a WebSocket URL")
         if self.live_trading and self.dry_run:
             raise ValueError("LIVE_TRADING=true cannot be combined with DRY_RUN=true")
+        if self.max_platforms > 20:
+            raise ValueError("MAX_PLATFORMS cannot exceed 20")
+        if self.max_symbols_per_platform > 10000:
+            raise ValueError("MAX_SYMBOLS_PER_PLATFORM cannot exceed 10000")
+        if self.max_ws_symbols > self.max_symbols_per_platform:
+            raise ValueError("MAX_WS_SYMBOLS cannot exceed MAX_SYMBOLS_PER_PLATFORM")
         if self.min_trade_notional_usdt < 0 or self.max_notional_usdt < 0:
             raise ValueError("notional limits cannot be negative")
         if self.max_notional_usdt and self.max_notional_usdt < self.min_trade_notional_usdt:
