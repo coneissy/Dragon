@@ -29,12 +29,7 @@ def _net_received(resp: dict, side: str, base: str, quote: str):
 
 
 def _validate_market(meta, side, amount, market_price=None):
-    """Validate a market order against the symbol's current quantity/notional rules.
-
-    Binance applies LOT_SIZE/MARKET_LOT_SIZE and NOTIONAL/MIN_NOTIONAL filters to
-    market orders. For SELL orders the notional is derived from the current bid;
-    BUY quoteOrderQty is already expressed in quote-asset notional.
-    """
+    """Validate a market order against the symbol's current quantity/notional rules."""
     step = Decimal(str(meta.get("stepSize", "0")))
     min_qty = Decimal(str(meta.get("minQty", "0")))
     max_qty = Decimal(str(meta.get("maxQty", "0")))
@@ -146,11 +141,16 @@ def _reconcile_and_recover(client, filters, baseline, assets):
     return recoveries
 
 
-def execute_triangle(client: BinanceClient, path, start_asset, first_asset, start_usdt, filters, dry_run=False):
+def execute_triangle(client: BinanceClient, path, start_asset, first_asset, start_usdt, filters, dry_run=False, expected_net_pnl=None):
     if dry_run:
         return {"dry_run": True, "path": path, "start_usdt": str(start_usdt)}
     if len(path) != 3:
         raise ExecutionError(f"triangle must contain exactly 3 symbols: {path}")
+    if expected_net_pnl is None:
+        raise ExecutionError("missing net-profit authorization; execution blocked")
+    expected_net = Decimal(str(expected_net_pnl))
+    if expected_net <= 0:
+        raise ExecutionError(f"non-positive expected net P&L {expected_net}; execution blocked")
 
     amount = Decimal(str(start_usdt))
     source_asset = start_asset or "USDT"
@@ -164,7 +164,6 @@ def execute_triangle(client: BinanceClient, path, start_asset, first_asset, star
     baseline = _account_balances(client, assets)
 
     try:
-        # One public snapshot is enough to pre-check market notional filters for all legs.
         ticker_rows = client.book_ticker()
         ticker = {x.get("symbol"): x for x in ticker_rows if x.get("symbol")}
         for symbol in path:
@@ -202,7 +201,8 @@ def execute_triangle(client: BinanceClient, path, start_asset, first_asset, star
 
         if source_asset != "USDT":
             raise ExecutionError(f"triangle did not finish in USDT: {source_asset}")
-        return {"dry_run": False, "legs": legs, "start_usdt": str(start_usdt), "final_asset": source_asset, "final_usdt": str(amount), "realized_pnl_usdt": str(amount - Decimal(str(start_usdt))), "finished": True, "duration_ms": round((time.time() - started) * 1000, 2), "timestamp": time.time()}
+        realized = amount - Decimal(str(start_usdt))
+        return {"dry_run": False, "legs": legs, "start_usdt": str(start_usdt), "final_asset": source_asset, "final_usdt": str(amount), "realized_pnl_usdt": str(realized), "finished": True, "duration_ms": round((time.time() - started) * 1000, 2), "timestamp": time.time()}
     except ExecutionError as exc:
         recovery_error = None
         try:
