@@ -28,7 +28,7 @@ services:
       - key: MIN_EXPECTED_PROFIT_USDT
         value: "0"
       - key: MIN_TRADE_NOTIONAL_USDT
-        value: "5"
+        value: "0.5"
       - key: MAX_NOTIONAL_USDT
         value: "0"
       - key: MAX_SLIPPAGE_BPS
