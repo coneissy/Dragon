@@ -10,7 +10,6 @@ contract MockToken {
         balanceOf[to] += amount;
     }
 
-    function approve(address, uint256) external pure returns (bool) { return true; }
     function transfer(address to, uint256 amount) external returns (bool) {
         balanceOf[msg.sender] -= amount;
         balanceOf[to] += amount;
@@ -80,5 +79,48 @@ contract DragonArbExecutorTest {
             )
         );
         require(!ok, "unprofitable route was accepted");
+    }
+
+    function testRejectsExpiredDeadline() public {
+        MockToken token = new MockToken();
+        MockRouter router = new MockRouter(token, 2 ether);
+        DragonArbExecutor executor = new DragonArbExecutor(address(this));
+        executor.setToken(address(token), true);
+        executor.setRouter(address(router), true);
+        token.mint(address(executor), 10 ether);
+
+        address[] memory routers = new address[](1);
+        routers[0] = address(router);
+        bytes[] memory calls = new bytes[](1);
+        calls[0] = abi.encodeCall(MockRouter.execute, ());
+
+        (bool ok, ) = address(executor).call(
+            abi.encodeCall(
+                DragonArbExecutor.execute,
+                (address(token), 1 ether, block.timestamp - 1, routers, calls)
+            )
+        );
+        require(!ok, "expired route was accepted");
+    }
+
+    function testRejectsEOARouter() public {
+        MockToken token = new MockToken();
+        DragonArbExecutor executor = new DragonArbExecutor(address(this));
+        executor.setToken(address(token), true);
+        executor.setRouter(address(0xBEEF), true);
+        token.mint(address(executor), 10 ether);
+
+        address[] memory routers = new address[](1);
+        routers[0] = address(0xBEEF);
+        bytes[] memory calls = new bytes[](1);
+        calls[0] = hex"";
+
+        (bool ok, ) = address(executor).call(
+            abi.encodeCall(
+                DragonArbExecutor.execute,
+                (address(token), 0, block.timestamp + 60, routers, calls)
+            )
+        );
+        require(!ok, "EOA router was accepted");
     }
 }
