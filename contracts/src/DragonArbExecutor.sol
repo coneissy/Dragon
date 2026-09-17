@@ -3,21 +3,20 @@ pragma solidity ^0.8.24;
 
 interface IERC20 {
     function balanceOf(address account) external view returns (uint256);
-    function approve(address spender, uint256 amount) external returns (bool);
     function transfer(address to, uint256 amount) external returns (bool);
 }
 
 /**
  * @title DragonArbExecutor
- * @notice Minimal, fail-closed on-chain executor for permissionless arbitrage.
+ * @notice Fail-closed on-chain settlement primitive for decentralized arbitrage.
  *
- * The off-chain searcher calculates the route and expected result. This
- * contract enforces the important settlement invariant on-chain:
- * startingBalance + minimumProfit must be present after the route executes.
- * Routers are allowlisted and arbitrary calls are disabled.
+ * The searcher supplies an already-constructed route. The contract enforces
+ * allowlisted routers/tokens, a deadline, and a minimum increase in the profit
+ * token balance. Every failed route reverts atomically.
  *
- * This contract does not implement a sandwich strategy and does not promise
- * profitability. It is an execution primitive for legitimate arbitrage.
+ * Router contracts are trusted infrastructure and MUST themselves enforce
+ * swap-specific minimum outputs/deadlines. Dragon does not implement a
+ * sandwich strategy.
  */
 contract DragonArbExecutor {
     error NotOwner();
@@ -27,6 +26,7 @@ contract DragonArbExecutor {
     error InsufficientProfit();
     error CallFailed();
     error InvalidRoute();
+    error ArithmeticOverflow();
 
     address public immutable owner;
     mapping(address => bool) public allowedRouter;
@@ -64,12 +64,6 @@ contract DragonArbExecutor {
         emit TokenPermission(token, allowed);
     }
 
-    /**
-     * @dev Execute a bounded sequence of pre-built router calls.
-     * Each call must target an allowlisted router. Token approvals are
-     * intentionally handled by the caller/searcher and can be reset by the
-     * caller between routes.
-     */
     function execute(
         address profitToken,
         uint256 minimumProfit,
@@ -82,15 +76,18 @@ contract DragonArbExecutor {
         if (routers.length == 0 || routers.length != calls.length) revert InvalidRoute();
 
         uint256 startingBalance = IERC20(profitToken).balanceOf(address(this));
+        if (minimumProfit > type(uint256).max - startingBalance) revert ArithmeticOverflow();
 
         for (uint256 i = 0; i < routers.length; i++) {
-            if (!allowedRouter[routers[i]]) revert RouterNotAllowed();
-            (bool ok, ) = routers[i].call(calls[i]);
+            address router = routers[i];
+            if (!allowedRouter[router] || router.code.length == 0) revert RouterNotAllowed();
+            (bool ok, ) = router.call(calls[i]);
             if (!ok) revert CallFailed();
         }
 
         uint256 endingBalance = IERC20(profitToken).balanceOf(address(this));
-        if (endingBalance < startingBalance + minimumProfit) revert InsufficientProfit();
+        uint256 requiredEndingBalance = startingBalance + minimumProfit;
+        if (endingBalance < requiredEndingBalance) revert InsufficientProfit();
 
         profit = endingBalance - startingBalance;
         emit ArbitrageExecuted(msg.sender, profitToken, startingBalance, endingBalance, profit);
