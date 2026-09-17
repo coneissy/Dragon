@@ -26,7 +26,8 @@ def test_three_leg_depth_math_returns_expected_final_usdt():
 def test_fee_is_applied_once_per_leg():
     result = calculate(("AUSDT", "AB", "BUSDT"), ("USDT", "A", "B"), books(), meta(), Decimal("10"), Decimal("10"), Decimal("0"))
     assert result is not None
-    expected = Decimal("10") * Decimal("0.99") ** 3 * Decimal("1.2")
+    # 10 bps = 0.10%, so each leg retains 0.999.
+    expected = Decimal("10") * Decimal("0.999") ** 3 * Decimal("1.2")
     assert abs(result.final_usdt - expected) < Decimal("0.0000000001")
 
 
