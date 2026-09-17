@@ -18,6 +18,12 @@ services:
         value: https://api.binance.com
       - key: BINANCE_WS_BASE
         value: wss://stream.binance.com:9443/ws
+      - key: BINANCE_FUTURES_ENABLED
+        value: "true"
+      - key: BINANCE_FUTURES_API_BASE
+        value: https://fapi.binance.com
+      - key: BINANCE_FUTURES_WS_BASE
+        value: wss://fstream.binance.com/ws
       # Safe default: the new single engine must pass runtime checks before live orders.
       - key: DRY_RUN
         value: "true"
