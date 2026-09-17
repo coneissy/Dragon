@@ -1,0 +1,22 @@
+name: Decentralized executor tests
+
+on:
+  push:
+    paths:
+      - "contracts/**"
+      - ".github/workflows/decentralized-contracts.yml"
+  pull_request:
+    paths:
+      - "contracts/**"
+      - ".github/workflows/decentralized-contracts.yml"
+
+jobs:
+  forge-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+      - run: forge test -vvv
+        working-directory: contracts
