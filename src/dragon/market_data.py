@@ -1,8 +1,9 @@
-"""Single Binance Spot market-data engine.
+"""Binance Spot market-data engine with sharded WebSocket subscriptions.
 
-Uses partial-depth snapshots rather than mixing several competing WS engines.
-A reconnect clears the in-memory books; trading resumes only after fresh books
-arrive, which prevents stale data from being treated as executable.
+Large universes are split across several connections so one overloaded combined
+stream cannot make otherwise healthy books appear stale. Each shard reconnects
+independently with exponential backoff and clears only its own books before
+resuming. Trading still requires every leg's book to be fresh.
 """
 import asyncio
 import json
@@ -23,15 +24,24 @@ class MarketData:
         self.books: Dict[str, dict] = {}
         self.last_message_ms = 0
         self.connected = False
+        self.connected_shards = 0
+        self.total_shards = 0
         self.reconnects = 0
+        self.disconnects = 0
+        self._lock = asyncio.Lock()
 
-    def _url(self):
+    def _shards(self):
+        # Keep combined streams comfortably below Binance/server and CPU limits.
+        shard_size = 40
+        return [self.symbols[i:i + shard_size] for i in range(0, len(self.symbols), shard_size)]
+
+    def _url(self, symbols):
         base = self.ws_base
         if base.endswith("/ws"):
             base = base[:-3]
         if not base.endswith("/stream"):
             base += "/stream"
-        streams = "/".join(f"{s.lower()}@depth{self.depth_levels}@100ms" for s in self.symbols)
+        streams = "/".join(f"{s.lower()}@depth{self.depth_levels}@100ms" for s in symbols)
         return f"{base}?streams={streams}"
 
     def update_from_payload(self, payload):
@@ -42,19 +52,29 @@ class MarketData:
         if not symbol or not bids or not asks:
             return False
         now = time.time_ns() // 1_000_000
+
         def clean(levels):
             out = []
             for level in levels[: self.depth_levels]:
                 if len(level) < 2:
                     continue
-                p, q = Decimal(str(level[0])), Decimal(str(level[1]))
+                try:
+                    p, q = Decimal(str(level[0])), Decimal(str(level[1]))
+                except Exception:
+                    continue
                 if p > 0 and q > 0:
                     out.append((str(p), str(q)))
             return out
+
         b, a = clean(bids), clean(asks)
         if not b or not a:
             return False
-        self.books[symbol] = {"bids": b, "asks": a, "updated_ms": now, "_source": "binance_ws_partial_depth"}
+        self.books[symbol] = {
+            "bids": b,
+            "asks": a,
+            "updated_ms": now,
+            "_source": "binance_ws_partial_depth",
+        }
         self.last_message_ms = now
         return True
 
@@ -67,32 +87,66 @@ class MarketData:
     def fresh_books(self, symbols):
         return all(self.fresh(s) for s in symbols)
 
-    async def run(self):
-        if not self.symbols:
-            raise RuntimeError("no Binance symbols selected for market data")
+    async def _run_shard(self, shard_id, symbols):
         attempt = 0
         while True:
             try:
-                self.books.clear()
-                self.connected = False
+                async with self._lock:
+                    for symbol in symbols:
+                        self.books.pop(symbol, None)
                 async with websockets.connect(
-                    self._url(), ping_interval=20, ping_timeout=20,
-                    close_timeout=5, open_timeout=15, max_size=2**20,
-                    max_queue=4096, compression=None,
+                    self._url(symbols),
+                    ping_interval=15,
+                    ping_timeout=10,
+                    close_timeout=5,
+                    open_timeout=15,
+                    max_size=2**20,
+                    max_queue=4096,
+                    compression=None,
                 ) as ws:
-                    self.connected = True
                     attempt = 0
-                    print(f"DRAGON WS | connected symbols={len(self.symbols)}", flush=True)
+                    async with self._lock:
+                        self.connected_shards += 1
+                        self.connected = self.connected_shards > 0
+                    print(
+                        f"DRAGON WS | shard={shard_id} connected symbols={len(symbols)} "
+                        f"connected_shards={self.connected_shards}/{self.total_shards}",
+                        flush=True,
+                    )
                     async for raw in ws:
                         payload = json.loads(raw)
                         self.update_from_payload(payload)
             except asyncio.CancelledError:
-                self.connected = False
                 raise
             except Exception as exc:
-                self.connected = False
                 self.reconnects += 1
+                self.disconnects += 1
                 delay = min(30.0, 2 ** min(attempt, 5)) + random.uniform(0, 0.5)
                 attempt += 1
-                print(f"DRAGON WS | disconnected reason={exc!s} reconnect_in={delay:.2f}s", flush=True)
+                print(
+                    f"DRAGON WS | shard={shard_id} disconnected reason={exc!s} "
+                    f"reconnect_in={delay:.2f}s",
+                    flush=True,
+                )
                 await asyncio.sleep(delay)
+            finally:
+                # Do not let a dead shard's last snapshot pass the stale gate.
+                async with self._lock:
+                    if self.connected_shards > 0:
+                        self.connected_shards -= 1
+                    self.connected = self.connected_shards > 0
+                    for symbol in symbols:
+                        self.books.pop(symbol, None)
+
+    async def run(self):
+        if not self.symbols:
+            raise RuntimeError("no Binance symbols selected for market data")
+        shards = self._shards()
+        self.total_shards = len(shards)
+        tasks = [asyncio.create_task(self._run_shard(i + 1, shard)) for i, shard in enumerate(shards)]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
