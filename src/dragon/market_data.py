@@ -6,12 +6,14 @@ import time
 from decimal import Decimal
 from typing import Dict
 
+import httpx
 import websockets
 
 
 class MarketData:
-    def __init__(self, ws_base: str, symbols, depth_levels=5, stale_ms=1500):
+    def __init__(self, ws_base: str, symbols, depth_levels=5, stale_ms=1500, api_base="https://api.binance.com"):
         self.ws_base = ws_base.rstrip("/")
+        self.api_base = api_base.rstrip("/")
         self.symbols = tuple(sorted({str(s).upper() for s in symbols}))
         self.depth_levels = max(5, min(20, int(depth_levels)))
         self.stale_ms = max(250, int(stale_ms))
@@ -24,8 +26,12 @@ class MarketData:
         self.total_shards = 0
         self.reconnects = 0
         self.disconnects = 0
+        self.bootstrap_ok = 0
+        self.bootstrap_failed = 0
+        self.ws_messages = 0
         self._lock = asyncio.Lock()
         self._logged_first_snapshot = set()
+        self._logged_first_message = set()
 
     def _shards(self):
         shard_size = 40
@@ -72,6 +78,57 @@ class MarketData:
         self.valid_updates += 1
         return True
 
+    def _update_rest_book(self, payload):
+        symbol = str(payload.get("s", "")).upper()
+        bids = payload.get("b") or []
+        asks = payload.get("a") or []
+        if not symbol or not bids or not asks:
+            return False
+        now = time.time_ns() // 1_000_000
+        self.books[symbol] = {
+            "bids": [(str(p), str(q)) for p, q in bids[: self.depth_levels]],
+            "asks": [(str(p), str(q)) for p, q in asks[: self.depth_levels]],
+            "updated_ms": now,
+            "_source": "binance_rest_depth_bootstrap",
+        }
+        return True
+
+    async def bootstrap(self):
+        """Seed books from Binance REST so the scanner has a known-good baseline while WS warms up."""
+        sem = asyncio.Semaphore(12)
+        timeout = httpx.Timeout(5.0, connect=3.0)
+        limits = httpx.Limits(max_connections=16, max_keepalive_connections=8)
+
+        async with httpx.AsyncClient(timeout=timeout, limits=limits) as client:
+            async def fetch(symbol):
+                async with sem:
+                    try:
+                        response = await client.get(
+                            self.api_base + "/api/v3/depth",
+                            params={"symbol": symbol, "limit": self.depth_levels},
+                        )
+                        response.raise_for_status()
+                        payload = response.json()
+                        if not self._update_rest_book({
+                            "s": symbol,
+                            "b": payload.get("bids") or [],
+                            "a": payload.get("asks") or [],
+                        }):
+                            self.bootstrap_failed += 1
+                            return False
+                        self.bootstrap_ok += 1
+                        return True
+                    except Exception as exc:
+                        self.bootstrap_failed += 1
+                        print(f"DRAGON REST_BOOTSTRAP | symbol={symbol} error={exc!s}", flush=True)
+                        return False
+
+            results = await asyncio.gather(*(fetch(symbol) for symbol in self.symbols), return_exceptions=False)
+        print(
+            f"DRAGON REST_BOOTSTRAP | ok={sum(bool(x) for x in results)} failed={self.bootstrap_failed} symbols={len(self.symbols)}",
+            flush=True,
+        )
+
     def fresh(self, symbol):
         book = self.books.get(symbol.upper())
         if not book:
@@ -80,6 +137,19 @@ class MarketData:
 
     def fresh_books(self, symbols):
         return all(self.fresh(s) for s in symbols)
+
+    def stale_symbols(self, symbols):
+        now = time.time_ns() // 1_000_000
+        out = []
+        for symbol in symbols:
+            book = self.books.get(symbol.upper())
+            if not book:
+                out.append(symbol.upper())
+                continue
+            age = now - int(book.get("updated_ms", 0))
+            if age > self.stale_ms:
+                out.append(f"{symbol.upper()}:{age}ms")
+        return out
 
     async def _run_shard(self, shard_id, symbols):
         attempt = 0
@@ -104,11 +174,17 @@ class MarketData:
                     attempt = 0
                     print(f"DRAGON WS | shard={shard_id} connected symbols={len(symbols)} connected_shards={self.connected_shards}/{self.total_shards} depth={self.depth_levels}", flush=True)
                     async for raw in ws:
+                        self.ws_messages += 1
                         try:
                             payload = json.loads(raw)
+                            if shard_id not in self._logged_first_message:
+                                self._logged_first_message.add(shard_id)
+                                data = payload.get("data", payload) if isinstance(payload, dict) else {}
+                                print(f"DRAGON WS_MSG | shard={shard_id} first_message event={data.get('e', '?')} symbol={data.get('s', '?')}", flush=True)
                             if self.update_from_payload(payload) and shard_id not in self._logged_first_snapshot:
                                 self._logged_first_snapshot.add(shard_id)
-                                print(f"DRAGON WS_DEPTH | shard={shard_id} first valid snapshot symbol={payload.get('data', {}).get('s', '?')} updates={self.valid_updates}", flush=True)
+                                data = payload.get("data", payload) if isinstance(payload, dict) else {}
+                                print(f"DRAGON WS_DEPTH | shard={shard_id} first valid snapshot symbol={data.get('s', '?')} updates={self.valid_updates}", flush=True)
                         except Exception as exc:
                             self.invalid_messages += 1
                             print(f"DRAGON WS_PARSE | shard={shard_id} error={exc!s}", flush=True)
@@ -132,6 +208,7 @@ class MarketData:
     async def run(self):
         if not self.symbols:
             raise RuntimeError("no Binance symbols selected for market data")
+        await self.bootstrap()
         shards = self._shards()
         self.total_shards = len(shards)
         tasks = [asyncio.create_task(self._run_shard(i + 1, shard)) for i, shard in enumerate(shards)]
