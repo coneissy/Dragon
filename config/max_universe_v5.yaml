@@ -10,7 +10,7 @@ dragon:
   reserve_balance: 1.0
   tradeable_balance: 8.0
   mode: MAX_UNIVERSE
-  description: "Maximum platforms. Maximum entries. 12 observation exchanges scanning against Binance."
+  description: "Maximum platforms. Maximum entries. DEX observation enabled; Binance remains the sole execution venue."
 
 exchanges:
   binance:
@@ -43,6 +43,24 @@ exchanges:
   bingx: {role: OBSERVATION, spot: true, futures: true, api_required: false, withdraw_enabled: false, data_feed: websocket_rest, fees_bps: {spot_taker: 10, spot_maker: 8, perp_taker: 6, perp_maker: 2}}
   coinbase: {role: OBSERVATION, spot: true, futures: true, api_required: false, withdraw_enabled: false, data_feed: websocket_rest, fees_bps: {spot_taker: 10, spot_maker: 4, perp_taker: 5, perp_maker: 2}}
 
+# DEX support is enabled for observation and quote analysis only.
+# No wallet signing, token approvals, or on-chain execution is enabled.
+dex:
+  enabled: true
+  mode: OBSERVATION_ONLY
+  execution_enabled: false
+  wallet_signing_enabled: false
+  token_approvals_enabled: false
+  chains: [ethereum, bsc, arbitrum, optimism, polygon, base, solana]
+  quote_providers: [1inch, 0x, jupiter]
+  include_gas_cost: true
+  include_slippage: true
+  include_price_impact: true
+  max_slippage_bps: 30
+  max_price_impact_bps: 50
+  min_net_edge_bps: 15
+  notes: "DEX opportunities may be observed and compared, but all live execution remains Binance-only."
+
 trading_modes:
   spot_triangular: {enabled: true, execution_venue: binance, allocation: 30, min_profit_spread_pct: 0.3, min_net_profit_bps: 3, max_slippage_bps: 3, latency_penalty_bps: 1, fees_bps: 30, break_even_bps: 40, min_entry_spread_bps: 41, position_pct: 95, re_entry_delay_seconds: 0}
   spot_perp: {enabled: true, execution_venue: binance, allocation: 70, funding_rate_threshold_pct: 0.01, max_basis_bps: 200, convergence_days_max: 14, leverage: 1, auto_spot_futures_transfer: true, min_transfer_amount: 5, transfer_confirmations: 1, fees_bps: {open: 14, close: 14, round_trip: 35}, spot_futures_transfer_fee: 0, min_entry_basis_bps: 36, position_pct: 95, re_entry_delay_seconds: 0}
@@ -63,10 +81,11 @@ hard_gates:
   min_edge: {condition: "net_profit_bps >= 3", default: true, fatal: true}
   liquidity_check: {condition: "depth_at_best_5 >= min_depth_usd", default: true, fatal: true}
   max_position: {condition: "notional <= 95% of tradeable balance", default: true, fatal: true}
-  no_observation_trade: {condition: "observation venues are signal-only; execution remains Binance", default: true, fatal: true}
+  no_observation_trade: {condition: "observation venues and DEX are signal-only; execution remains Binance", default: true, fatal: true}
   binance_connectivity: {condition: "Binance API must be connected", default: true, fatal: true}
   spot_perp_basis_max: {condition: "basis_bps <= max_basis_bps (200)", default: true, fatal: false}
   transfer_confirmed: {condition: "spot-futures transfer confirmed before perp open", default: true, fatal: true}
+  dex_safety: {condition: "DEX execution, wallet signing, and approvals remain disabled", default: true, fatal: true}
   daily_loss_limit: {condition: "REMOVED -- no daily loss limit in MAX UNIVERSE", default: false, fatal: false}
 
 risk_limits:
