@@ -1,9 +1,4 @@
-"""Binance Spot market-data engine with sharded WebSocket subscriptions.
-
-Large universes are split across several connections. The feed is kept light
-with top-5 partial depth at 100ms while a strict freshness gate remains in
-place before any triangle is considered executable.
-"""
+"""Binance Spot market-data engine with resilient sharded WebSocket subscriptions."""
 import asyncio
 import json
 import random
@@ -72,12 +67,7 @@ class MarketData:
         if not b or not a:
             self.invalid_messages += 1
             return False
-        self.books[symbol] = {
-            "bids": b,
-            "asks": a,
-            "updated_ms": now,
-            "_source": "binance_ws_partial_depth",
-        }
+        self.books[symbol] = {"bids": b, "asks": a, "updated_ms": now, "_source": "binance_ws_partial_depth"}
         self.last_message_ms = now
         self.valid_updates += 1
         return True
@@ -100,33 +90,25 @@ class MarketData:
                         self.books.pop(symbol, None)
                 async with websockets.connect(
                     self._url(symbols),
-                    ping_interval=15,
+                    ping_interval=10,
                     ping_timeout=10,
                     close_timeout=5,
                     open_timeout=15,
                     max_size=2**20,
-                    max_queue=4096,
+                    max_queue=8192,
                     compression=None,
                 ) as ws:
-                    attempt = 0
                     async with self._lock:
                         self.connected_shards += 1
                         self.connected = self.connected_shards > 0
-                    print(
-                        f"DRAGON WS | shard={shard_id} connected symbols={len(symbols)} "
-                        f"connected_shards={self.connected_shards}/{self.total_shards} "
-                        f"depth={self.depth_levels}", flush=True,
-                    )
+                    attempt = 0
+                    print(f"DRAGON WS | shard={shard_id} connected symbols={len(symbols)} connected_shards={self.connected_shards}/{self.total_shards} depth={self.depth_levels}", flush=True)
                     async for raw in ws:
                         try:
                             payload = json.loads(raw)
                             if self.update_from_payload(payload) and shard_id not in self._logged_first_snapshot:
                                 self._logged_first_snapshot.add(shard_id)
-                                print(
-                                    f"DRAGON WS_DEPTH | shard={shard_id} first valid snapshot "
-                                    f"symbol={payload.get('data', {}).get('s', '?')} "
-                                    f"updates={self.valid_updates}", flush=True,
-                                )
+                                print(f"DRAGON WS_DEPTH | shard={shard_id} first valid snapshot symbol={payload.get('data', {}).get('s', '?')} updates={self.valid_updates}", flush=True)
                         except Exception as exc:
                             self.invalid_messages += 1
                             print(f"DRAGON WS_PARSE | shard={shard_id} error={exc!s}", flush=True)
@@ -137,10 +119,7 @@ class MarketData:
                 self.disconnects += 1
                 delay = min(30.0, 2 ** min(attempt, 5)) + random.uniform(0, 0.5)
                 attempt += 1
-                print(
-                    f"DRAGON WS | shard={shard_id} disconnected reason={exc!s} "
-                    f"reconnect_in={delay:.2f}s", flush=True,
-                )
+                print(f"DRAGON WS | shard={shard_id} disconnected reason={exc!s} reconnect_in={delay:.2f}s", flush=True)
                 await asyncio.sleep(delay)
             finally:
                 async with self._lock:
