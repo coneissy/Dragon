@@ -174,14 +174,14 @@ async def _run(cfg: Config):
                 if len(books) != 3:
                     telemetry.candidate(tri.symbols, status="REJECT", reason="NO_LIQUIDITY")
                     continue
-                result = calculate(tri.symbols, tri.assets, books, {s: (filters[s]["baseAsset"], filters[s]["quoteAsset"]) for s in tri.symbols}, budget, cfg.fee_bps, cfg.max_slippage_bps)
+                result = calculate(tri.symbols, tri.assets, books, {s: (filters[s]["baseAsset"], filters[s]["quoteAsset"]) for s in tri.symbols}, budget, (cfg.fee_leg_1_bps, cfg.fee_leg_2_bps, cfg.fee_leg_3_bps), cfg.max_slippage_bps)
                 if result is None:
                     telemetry.candidate(tri.symbols, status="REJECT", reason="INSUFFICIENT_DEPTH")
                     continue
-                eligible = risk.can_trade() and result.net_bps >= Decimal(str(cfg.min_net_edge_bps)) and result.net_pnl_usdt >= Decimal(str(cfg.min_expected_profit_usdt)) and budget >= Decimal(str(cfg.min_trade_notional_usdt))
-                reason = None if eligible else ("BELOW_NET_EDGE" if result.net_bps < Decimal(str(cfg.min_net_edge_bps)) else "RISK_LIMIT")
+                eligible = risk.can_trade() and result.profitable and result.net_bps >= Decimal(str(cfg.min_net_edge_bps)) and result.net_pnl_usdt >= Decimal(str(cfg.min_expected_profit_usdt)) and budget >= Decimal(str(cfg.min_trade_notional_usdt))
+                reason = None if eligible else ("NON_POSITIVE_NET" if result.net_pnl_usdt <= 0 else ("BELOW_NET_EDGE" if result.net_bps < Decimal(str(cfg.min_net_edge_bps)) else "RISK_LIMIT"))
                 telemetry.candidate(tri.symbols, status="ACCEPT" if eligible else "REJECT", reason=reason, result=result, notional=budget)
-                item = {"path": tri.symbols, "net_bps": float(result.net_bps), "gross_bps": float(result.gross_bps), "score": _score(result.net_bps), "tier": _tier(_score(result.net_bps)), "eligible": eligible, "rejection_reason": reason, "evaluation_notional": str(budget), "trade_budget": str(budget), "depth_drag_bps": float(result.depth_drag_bps), "fee_drag_bps": float(result.fee_drag_bps), "safety_bps": float(result.safety_bps), "break_even_gross_bps": float(result.break_even_gross_bps)}
+                item = {"path": tri.symbols, "net_bps": float(result.net_bps), "gross_bps": float(result.gross_bps), "score": _score(result.net_bps), "tier": _tier(_score(result.net_bps)), "eligible": eligible, "rejection_reason": reason, "evaluation_notional": str(budget), "trade_budget": str(budget), "depth_drag_bps": float(result.depth_drag_bps), "fee_drag_bps": float(result.fee_drag_bps), "safety_bps": float(result.safety_bps), "break_even_gross_bps": float(result.break_even_gross_bps), "leg_fees": [str(x.fee) for x in result.legs]}
                 candidates.append(item)
                 if eligible and (best is None or result.net_bps > best[0].net_bps):
                     best = (result, tri)
@@ -189,11 +189,11 @@ async def _run(cfg: Config):
             candidates.sort(key=lambda x: x["net_bps"], reverse=True)
             _state(universe_top=candidates[:50], universe_qualified=sum(1 for x in candidates if x["net_bps"] > 0), universe_rejected=sum(1 for x in candidates if not x["eligible"]), universe_execution_ready=sum(1 for x in candidates if x["eligible"]), universe_selected=1 if best else 0, opportunities=len(candidates), best_net_edge_bps=candidates[0]["net_bps"] if candidates else 0.0, top_opportunities=candidates[:20], universe_cycle_ms=(time.perf_counter() - started) * 1000, universe_last_cycle_at=now)
 
-            if best and risk.can_trade() and (now - last_trade) * 1000 >= cfg.cooldown_ms:
+            if best and risk.can_trade() and best[0].net_pnl_usdt > 0 and (now - last_trade) * 1000 >= cfg.cooldown_ms:
                 result, tri = best
                 if cfg.live_trading and not cfg.dry_run:
                     try:
-                        execution = execute_triangle(client, tri.symbols, "USDT", tri.assets[1], budget, filters, dry_run=False)
+                        execution = execute_triangle(client, tri.symbols, "USDT", tri.assets[1], budget, filters, dry_run=False, expected_net_pnl=result.net_pnl_usdt)
                         last_trade = time.time()
                         _state(ledger_filled=STATE["ledger_filled"] + 1, last_execution=execution)
                     except Exception as exc:
