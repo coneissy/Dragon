@@ -28,7 +28,7 @@ STATE = {
     "evaluation_attempts": 0, "universe_qualified": 0, "universe_execution_ready": 0,
     "universe_rejected": 0, "universe_selected": 0, "best_net_edge_bps": 0.0,
     "warnings": [], "top_opportunities": [], "universe_top": [],
-    "ws_connected_shards": 0, "ws_total_shards": 1, "ws_health": "connecting",
+    "ws_connected_shards": 0, "ws_total_shards": 0, "ws_health": "connecting",
     "ws_reconnects": 0, "ws_disconnects": 0, "depth_updates": 0,
     "ledger_filled": 0, "realized_pnl_usdt": 0.0, "balance_refreshes": 0,
     "controls": {"kill_switch": False}, "recent": [],
@@ -95,8 +95,6 @@ def _top_symbols(rows, cap):
 
 
 def _score(net_bps):
-    # Workbook gate is 40/100. The core score is transparent: 40 at the
-    # 3-bps net floor, increasing one point per additional net bps, capped 100.
     return max(0.0, min(100.0, 40.0 + float(net_bps) - 3.0))
 
 
@@ -122,7 +120,6 @@ async def _run(cfg: Config):
         ticker = client.ticker_24hr()
         symbols = _top_symbols(ticker, int(__import__("os").getenv("MAX_WS_SYMBOLS", "300")))
         triangles = build_triangles(exchange_info, cfg.max_triangles)
-        # Subscribe only to symbols that participate in the discovered triangles.
         needed = sorted({s for t in triangles for s in t.symbols if s in filters})
         if len(needed) > int(__import__("os").getenv("MAX_WS_SYMBOLS", "300")):
             rank = {s: i for i, s in enumerate(symbols)}
@@ -131,7 +128,7 @@ async def _run(cfg: Config):
         selected = set(needed)
         triangles = [t for t in triangles if all(s in selected for s in t.symbols)]
         md = MarketData(cfg.ws_base, needed, cfg.depth_levels, cfg.stale_ms)
-        _state(symbols=len(needed), triangles=len(triangles), ws_total_shards=1, ws_health="connecting", health="starting", dry_run=cfg.dry_run, live=cfg.live_trading and not cfg.dry_run)
+        _state(symbols=len(needed), triangles=len(triangles), ws_total_shards=max(1, len(md._shards())), ws_health="connecting", health="starting", dry_run=cfg.dry_run, live=cfg.live_trading and not cfg.dry_run)
         ws_task = asyncio.create_task(md.run())
         last_balance = Decimal("9")
         if cfg.live_trading and not cfg.dry_run:
@@ -150,8 +147,9 @@ async def _run(cfg: Config):
             cycle += 1
             started = time.perf_counter()
             now = time.time()
-            connected = md.connected
-            _state(ws_connected_shards=1 if connected else 0, ws_health="healthy" if connected else "reconnecting", ws_reconnects=md.reconnects, depth_updates=md.last_message_ms, scans=cycle)
+            connected_shards = md.connected_shards
+            connected = connected_shards > 0
+            _state(ws_connected_shards=connected_shards, ws_total_shards=md.total_shards or max(1, len(md._shards())), ws_health="healthy" if connected_shards == (md.total_shards or 0) else ("degraded" if connected else "reconnecting"), ws_reconnects=md.reconnects, ws_disconnects=md.disconnects, depth_updates=md.last_message_ms, scans=cycle)
             if not connected:
                 await asyncio.sleep(0.25)
                 continue
@@ -189,7 +187,7 @@ async def _run(cfg: Config):
                     telemetry.record("DRY_RUN", f"selected {tri.symbols} net={result.net_bps:.3f}bps score={score:.1f}")
                     last_trade = time.time()
             snap = telemetry.snapshot()
-            _state(recent=snap["recent"][-50:], controls={"kill_switch": risk.kill_switch}, health="healthy", ws_health="healthy")
+            _state(recent=snap["recent"][-50:], controls={"kill_switch": risk.kill_switch}, health="healthy", ws_health="healthy" if md.connected_shards == md.total_shards else "degraded")
             await asyncio.sleep(max(0.05, cfg.cooldown_ms / 1000.0 if cfg.cooldown_ms else 0.30))
     finally:
         client.close()
