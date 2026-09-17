@@ -18,8 +18,8 @@ class Config:
     safety_reserve_usdt: float = 1.0
     cooldown_ms: int = 0
     max_triangles: int = 0
-    stale_ms: int = 500
-    depth_levels: int = 20
+    stale_ms: int = 1500
+    depth_levels: int = 5
     order_timeout_ms: int = 5000
     max_consecutive_losses: int = 5
     max_drawdown_pct: float = 15.0
@@ -48,8 +48,8 @@ class Config:
             safety_reserve_usdt=max(0.0, float(os.getenv("ARB_SAFETY_RESERVE_USDT", cls.safety_reserve_usdt))),
             cooldown_ms=max(0, int(os.getenv("LIVE_ORDER_COOLDOWN_MS", cls.cooldown_ms))),
             max_triangles=max(0, int(os.getenv("MAX_TRIANGLES", cls.max_triangles))),
-            stale_ms=max(50, int(os.getenv("STALE_MS", cls.stale_ms))),
-            depth_levels=max(1, min(100, int(os.getenv("DEPTH_LEVELS", cls.depth_levels)))),
+            stale_ms=max(250, int(os.getenv("STALE_MS", cls.stale_ms))),
+            depth_levels=max(5, min(20, int(os.getenv("DEPTH_LEVELS", cls.depth_levels)))),
             order_timeout_ms=max(1000, int(os.getenv("ORDER_TIMEOUT_MS", cls.order_timeout_ms))),
             max_consecutive_losses=max(1, int(os.getenv("MAX_CONSECUTIVE_LOSSES", cls.max_consecutive_losses))),
             max_drawdown_pct=max(0.1, float(os.getenv("MAX_DRAWDOWN_PCT", cls.max_drawdown_pct))),
