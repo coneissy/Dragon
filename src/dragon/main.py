@@ -30,6 +30,7 @@ STATE = {
     "warnings": [], "top_opportunities": [], "universe_top": [],
     "ws_connected_shards": 0, "ws_total_shards": 0, "ws_health": "connecting",
     "ws_reconnects": 0, "ws_disconnects": 0, "depth_updates": 0,
+    "ws_messages": 0, "ws_invalid_messages": 0, "rest_bootstrap_ok": 0, "rest_bootstrap_failed": 0,
     "ledger_filled": 0, "realized_pnl_usdt": 0.0, "balance_refreshes": 0,
     "controls": {"kill_switch": False}, "recent": [],
 }
@@ -127,7 +128,7 @@ async def _run(cfg: Config):
             needed = needed[: int(__import__("os").getenv("MAX_WS_SYMBOLS", "300"))]
         selected = set(needed)
         triangles = [t for t in triangles if all(s in selected for s in t.symbols)]
-        md = MarketData(cfg.ws_base, needed, cfg.depth_levels, cfg.stale_ms)
+        md = MarketData(cfg.ws_base, needed, cfg.depth_levels, cfg.stale_ms, cfg.api_base)
         _state(symbols=len(needed), triangles=len(triangles), ws_total_shards=max(1, len(md._shards())), ws_health="connecting", health="starting", dry_run=cfg.dry_run, live=cfg.live_trading and not cfg.dry_run)
         ws_task = asyncio.create_task(md.run())
         last_balance = Decimal("9")
@@ -149,7 +150,7 @@ async def _run(cfg: Config):
             now = time.time()
             connected_shards = md.connected_shards
             connected = connected_shards > 0
-            _state(ws_connected_shards=connected_shards, ws_total_shards=md.total_shards or max(1, len(md._shards())), ws_health="healthy" if connected_shards == (md.total_shards or 0) else ("degraded" if connected else "reconnecting"), ws_reconnects=md.reconnects, ws_disconnects=md.disconnects, depth_updates=md.last_message_ms, scans=cycle)
+            _state(ws_connected_shards=connected_shards, ws_total_shards=md.total_shards or max(1, len(md._shards())), ws_health="healthy" if connected_shards == (md.total_shards or 0) else ("degraded" if connected else "reconnecting"), ws_reconnects=md.reconnects, ws_disconnects=md.disconnects, depth_updates=md.valid_updates, ws_messages=md.ws_messages, ws_invalid_messages=md.invalid_messages, rest_bootstrap_ok=md.bootstrap_ok, rest_bootstrap_failed=md.bootstrap_failed, scans=cycle)
             if not connected:
                 await asyncio.sleep(0.25)
                 continue
