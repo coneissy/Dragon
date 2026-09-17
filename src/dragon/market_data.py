@@ -1,9 +1,8 @@
 """Binance Spot market-data engine with sharded WebSocket subscriptions.
 
-Large universes are split across several connections so one overloaded combined
-stream cannot make otherwise healthy books appear stale. Each shard reconnects
-independently with exponential backoff and clears only its own books before
-resuming. Trading still requires every leg's book to be fresh.
+Large universes are split across several connections. The feed is kept light
+with top-5 partial depth at 100ms while a strict freshness gate remains in
+place before any triangle is considered executable.
 """
 import asyncio
 import json
@@ -16,22 +15,24 @@ import websockets
 
 
 class MarketData:
-    def __init__(self, ws_base: str, symbols, depth_levels=20, stale_ms=500):
+    def __init__(self, ws_base: str, symbols, depth_levels=5, stale_ms=1500):
         self.ws_base = ws_base.rstrip("/")
         self.symbols = tuple(sorted({str(s).upper() for s in symbols}))
         self.depth_levels = max(5, min(20, int(depth_levels)))
-        self.stale_ms = max(50, int(stale_ms))
+        self.stale_ms = max(250, int(stale_ms))
         self.books: Dict[str, dict] = {}
         self.last_message_ms = 0
+        self.valid_updates = 0
+        self.invalid_messages = 0
         self.connected = False
         self.connected_shards = 0
         self.total_shards = 0
         self.reconnects = 0
         self.disconnects = 0
         self._lock = asyncio.Lock()
+        self._logged_first_snapshot = set()
 
     def _shards(self):
-        # Keep combined streams comfortably below Binance/server and CPU limits.
         shard_size = 40
         return [self.symbols[i:i + shard_size] for i in range(0, len(self.symbols), shard_size)]
 
@@ -50,6 +51,7 @@ class MarketData:
         bids = data.get("b")
         asks = data.get("a")
         if not symbol or not bids or not asks:
+            self.invalid_messages += 1
             return False
         now = time.time_ns() // 1_000_000
 
@@ -68,6 +70,7 @@ class MarketData:
 
         b, a = clean(bids), clean(asks)
         if not b or not a:
+            self.invalid_messages += 1
             return False
         self.books[symbol] = {
             "bids": b,
@@ -76,6 +79,7 @@ class MarketData:
             "_source": "binance_ws_partial_depth",
         }
         self.last_message_ms = now
+        self.valid_updates += 1
         return True
 
     def fresh(self, symbol):
@@ -110,12 +114,22 @@ class MarketData:
                         self.connected = self.connected_shards > 0
                     print(
                         f"DRAGON WS | shard={shard_id} connected symbols={len(symbols)} "
-                        f"connected_shards={self.connected_shards}/{self.total_shards}",
-                        flush=True,
+                        f"connected_shards={self.connected_shards}/{self.total_shards} "
+                        f"depth={self.depth_levels}", flush=True,
                     )
                     async for raw in ws:
-                        payload = json.loads(raw)
-                        self.update_from_payload(payload)
+                        try:
+                            payload = json.loads(raw)
+                            if self.update_from_payload(payload) and shard_id not in self._logged_first_snapshot:
+                                self._logged_first_snapshot.add(shard_id)
+                                print(
+                                    f"DRAGON WS_DEPTH | shard={shard_id} first valid snapshot "
+                                    f"symbol={payload.get('data', {}).get('s', '?')} "
+                                    f"updates={self.valid_updates}", flush=True,
+                                )
+                        except Exception as exc:
+                            self.invalid_messages += 1
+                            print(f"DRAGON WS_PARSE | shard={shard_id} error={exc!s}", flush=True)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -125,12 +139,10 @@ class MarketData:
                 attempt += 1
                 print(
                     f"DRAGON WS | shard={shard_id} disconnected reason={exc!s} "
-                    f"reconnect_in={delay:.2f}s",
-                    flush=True,
+                    f"reconnect_in={delay:.2f}s", flush=True,
                 )
                 await asyncio.sleep(delay)
             finally:
-                # Do not let a dead shard's last snapshot pass the stale gate.
                 async with self._lock:
                     if self.connected_shards > 0:
                         self.connected_shards -= 1
