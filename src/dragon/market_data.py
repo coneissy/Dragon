@@ -1,4 +1,4 @@
-"""Binance Spot market-data engine with resilient sharded WebSocket subscriptions."""
+"""Single-owner Binance Spot market-data engine with resilient WS sharding."""
 import asyncio
 import json
 import random
@@ -46,55 +46,64 @@ class MarketData:
         streams = "/".join(f"{s.lower()}@depth{self.depth_levels}@100ms" for s in symbols)
         return f"{base}?streams={streams}"
 
+    @staticmethod
+    def _clean_levels(levels, limit):
+        out = []
+        for level in (levels or [])[:limit]:
+            if len(level) < 2:
+                continue
+            try:
+                p, q = Decimal(str(level[0])), Decimal(str(level[1]))
+            except Exception:
+                continue
+            if p > 0 and q > 0:
+                out.append((str(p), str(q)))
+        return out
+
     def update_from_payload(self, payload):
         data = payload.get("data", payload) if isinstance(payload, dict) else {}
         symbol = str(data.get("s", "")).upper()
-        bids = data.get("b")
-        asks = data.get("a")
-        if not symbol or not bids or not asks:
+        if not symbol or symbol not in self.symbols:
+            self.invalid_messages += 1
+            return False
+        bids = self._clean_levels(data.get("b"), self.depth_levels)
+        asks = self._clean_levels(data.get("a"), self.depth_levels)
+        if not bids or not asks:
             self.invalid_messages += 1
             return False
         now = time.time_ns() // 1_000_000
-
-        def clean(levels):
-            out = []
-            for level in levels[: self.depth_levels]:
-                if len(level) < 2:
-                    continue
-                try:
-                    p, q = Decimal(str(level[0])), Decimal(str(level[1]))
-                except Exception:
-                    continue
-                if p > 0 and q > 0:
-                    out.append((str(p), str(q)))
-            return out
-
-        b, a = clean(bids), clean(asks)
-        if not b or not a:
-            self.invalid_messages += 1
-            return False
-        self.books[symbol] = {"bids": b, "asks": a, "updated_ms": now, "_source": "binance_ws_partial_depth"}
+        # Store one canonical schema. updated_ms is the only freshness clock.
+        self.books[symbol] = {
+            "bids": bids,
+            "asks": asks,
+            "updated_ms": now,
+            "depth_ts": now,
+            "event_ts": int(data.get("E", now)),
+            "last_update_id": data.get("u"),
+            "_source": "binance_ws_depth",
+        }
         self.last_message_ms = now
         self.valid_updates += 1
         return True
 
-    def _update_rest_book(self, payload):
-        symbol = str(payload.get("s", "")).upper()
-        bids = payload.get("b") or []
-        asks = payload.get("a") or []
-        if not symbol or not bids or not asks:
+    def _update_rest_book(self, symbol, payload):
+        bids = self._clean_levels(payload.get("bids") or payload.get("b"), self.depth_levels)
+        asks = self._clean_levels(payload.get("asks") or payload.get("a"), self.depth_levels)
+        if not bids or not asks:
             return False
         now = time.time_ns() // 1_000_000
-        self.books[symbol] = {
-            "bids": [(str(p), str(q)) for p, q in bids[: self.depth_levels]],
-            "asks": [(str(p), str(q)) for p, q in asks[: self.depth_levels]],
+        self.books[symbol.upper()] = {
+            "bids": bids,
+            "asks": asks,
             "updated_ms": now,
+            "depth_ts": now,
+            "event_ts": now,
+            "last_update_id": payload.get("lastUpdateId"),
             "_source": "binance_rest_depth_bootstrap",
         }
         return True
 
     async def bootstrap(self):
-        """Seed books from Binance REST without blocking WebSocket warm-up."""
         sem = asyncio.Semaphore(12)
         timeout = httpx.Timeout(5.0, connect=3.0)
         limits = httpx.Limits(max_connections=16, max_keepalive_connections=8)
@@ -104,8 +113,7 @@ class MarketData:
                     try:
                         response = await client.get(self.api_base + "/api/v3/depth", params={"symbol": symbol, "limit": self.depth_levels})
                         response.raise_for_status()
-                        payload = response.json()
-                        if not self._update_rest_book({"s": symbol, "b": payload.get("bids") or [], "a": payload.get("asks") or []}):
+                        if not self._update_rest_book(symbol, response.json()):
                             self.bootstrap_failed += 1
                             return False
                         self.bootstrap_ok += 1
@@ -121,10 +129,14 @@ class MarketData:
         book = self.books.get(symbol.upper())
         if not book:
             return False
-        return (time.time_ns() // 1_000_000) - int(book["updated_ms"]) <= self.stale_ms
+        return (time.time_ns() // 1_000_000) - int(book.get("updated_ms", 0)) <= self.stale_ms
 
     def fresh_books(self, symbols):
         return all(self.fresh(s) for s in symbols)
+
+    def snapshot(self, symbols):
+        """Return a consistent local snapshot for a triangle evaluation."""
+        return {s.upper(): dict(self.books[s.upper()]) for s in symbols if s.upper() in self.books}
 
     def stale_symbols(self, symbols):
         now = time.time_ns() // 1_000_000
@@ -143,13 +155,15 @@ class MarketData:
         attempt = 0
         while True:
             try:
-                async with self._lock:
-                    for symbol in symbols:
-                        self.books.pop(symbol, None)
-                async with websockets.connect(self._url(symbols), ping_interval=10, ping_timeout=10, close_timeout=5, open_timeout=15, max_size=2**20, max_queue=8192, compression=None) as ws:
-                    async with self._lock:
-                        self.connected_shards += 1
-                        self.connected = True
+                for symbol in symbols:
+                    self.books.pop(symbol, None)
+                async with websockets.connect(
+                    self._url(symbols), ping_interval=10, ping_timeout=10,
+                    close_timeout=5, open_timeout=15, max_size=2**20,
+                    max_queue=8192, compression=None,
+                ) as ws:
+                    self.connected_shards += 1
+                    self.connected = self.connected_shards == self.total_shards
                     attempt = 0
                     print(f"DRAGON WS | shard={shard_id} connected symbols={len(symbols)} connected_shards={self.connected_shards}/{self.total_shards} depth={self.depth_levels}", flush=True)
                     async for raw in ws:
@@ -176,12 +190,11 @@ class MarketData:
                 print(f"DRAGON WS | shard={shard_id} disconnected reason={exc!s} reconnect_in={delay:.2f}s", flush=True)
                 await asyncio.sleep(delay)
             finally:
-                async with self._lock:
-                    if self.connected_shards > 0:
-                        self.connected_shards -= 1
-                    self.connected = self.connected_shards > 0
-                    for symbol in symbols:
-                        self.books.pop(symbol, None)
+                if self.connected_shards > 0:
+                    self.connected_shards -= 1
+                self.connected = self.connected_shards == self.total_shards and self.total_shards > 0
+                for symbol in symbols:
+                    self.books.pop(symbol, None)
 
     async def run(self):
         if not self.symbols:
