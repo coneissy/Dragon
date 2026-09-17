@@ -2,15 +2,15 @@ from __future__ import annotations
 
 """MAX UNIVERSE v5 opportunity math.
 
-This module is deliberately pure: it consumes a loaded profile plus live quote
-inputs and returns a deterministic gate/score decision. It never places orders.
-Observation venues remain observation-only; Binance is the execution venue.
+Pure opportunity evaluation only. Observation venues never execute orders.
+Candidates with non-positive net edge are always rejected and have zero
+executable size/profit. Use ``deduplicate_opportunities`` before queueing.
 """
 
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 try:
     import yaml
@@ -34,6 +34,14 @@ class Opportunity:
     tier: str
     position_pct: Decimal
     gate: str
+
+    @property
+    def candidate_id(self) -> str:
+        return f"{self.symbol.upper()}|{self.buy_venue.lower()}|{self.sell_venue.lower()}"
+
+    @property
+    def executable(self) -> bool:
+        return self.gate == "PASS" and self.net_edge_bps > 0 and self.position_pct > 0
 
 
 def load_profile(path: str | Path) -> dict[str, Any]:
@@ -61,12 +69,9 @@ def validate_profile(profile: Mapping[str, Any]) -> None:
         raise ValueError("MAX UNIVERSE requires exactly 12 observation venues")
 
     gates = profile.get("hard_gates", {})
-    if not gates.get("binance_connectivity", {}).get("fatal", False):
-        raise ValueError("Binance connectivity must be a fatal gate")
-    if not gates.get("fresh_data", {}).get("fatal", False):
-        raise ValueError("fresh_data must be a fatal gate")
-    if not gates.get("liquidity_check", {}).get("fatal", False):
-        raise ValueError("liquidity_check must be a fatal gate")
+    for gate_name in ("binance_connectivity", "fresh_data", "liquidity_check"):
+        if not gates.get(gate_name, {}).get("fatal", False):
+            raise ValueError(f"{gate_name} must be a fatal gate")
 
 
 def _d(value: Any) -> Decimal:
@@ -74,8 +79,6 @@ def _d(value: Any) -> Decimal:
 
 
 def _tier(score: Decimal, tiers: Mapping[str, Any]) -> tuple[str, Decimal]:
-    # Thresholds in the supplied profile are lower bounds. Entry sizes are
-    # intentionally taken from the profile rather than invented here.
     ordered = sorted(
         ((k, _d(v)) for k, v in tiers.items() if k != "reject_below"),
         key=lambda item: item[1],
@@ -149,7 +152,6 @@ def evaluate_cross_exchange(
     fee = _d(buy_fee_bps) + _d(sell_fee_bps)
     net = gross - fee - _d(slippage_bps) - _d(latency_penalty_bps)
     notional = max(Decimal("0"), _d(executable_notional_usdt))
-    expected = notional * net / Decimal("10000")
 
     score, tier, _ = score_opportunity(
         gross_edge_bps=gross,
@@ -164,27 +166,27 @@ def evaluate_cross_exchange(
     stale_limit = Decimal("500")
     position_limit = _d(profile["dragon"]["tradeable_balance"]) * _d(profile["compounding"]["position_pct"]) / Decimal("100")
 
+    gate = "PASS"
+    position_pct = Decimal("0")
     if not binance_connected:
         gate = "BINANCE_CONNECTIVITY"
-        position_pct = Decimal("0")
     elif _d(book_age_ms) >= stale_limit:
         gate = "STALE_DATA"
-        position_pct = Decimal("0")
     elif not depth_ok or notional <= 0:
         gate = "LIQUIDITY"
-        position_pct = Decimal("0")
     elif notional > position_limit:
         gate = "MAX_POSITION"
-        position_pct = Decimal("0")
-    elif net < min_edge:
+    elif net <= 0 or net < min_edge:
         gate = "NET_EDGE"
-        position_pct = Decimal("0")
     elif score < min_score:
         gate = "SCORE"
-        position_pct = Decimal("0")
     else:
-        gate = "PASS"
         position_pct = _d(profile["opportunity_scoring"]["entry_sizes"].get(tier, 0))
+        if position_pct <= 0:
+            gate = "SCORE"
+
+    executable_notional = min(notional, position_limit) if gate == "PASS" else Decimal("0")
+    expected = executable_notional * net / Decimal("10000") if gate == "PASS" and net > 0 else Decimal("0")
 
     return Opportunity(
         symbol=symbol,
@@ -195,10 +197,20 @@ def evaluate_cross_exchange(
         slippage_bps=_d(slippage_bps),
         latency_penalty_bps=_d(latency_penalty_bps),
         net_edge_bps=net,
-        executable_notional_usdt=min(notional, position_limit),
+        executable_notional_usdt=executable_notional,
         expected_profit_usdt=expected,
         score=score,
         tier=tier,
         position_pct=position_pct,
         gate=gate,
     )
+
+
+def deduplicate_opportunities(opportunities: Iterable[Opportunity]) -> list[Opportunity]:
+    """Return one candidate per symbol/buy/sell route, preferring higher net edge."""
+    selected: dict[str, Opportunity] = {}
+    for opportunity in opportunities:
+        current = selected.get(opportunity.candidate_id)
+        if current is None or opportunity.net_edge_bps > current.net_edge_bps:
+            selected[opportunity.candidate_id] = opportunity
+    return list(selected.values())
