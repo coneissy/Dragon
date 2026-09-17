@@ -17,6 +17,9 @@ class Config:
     min_trade_notional_usdt: float = 5.0
     max_notional_usdt: float = 0.0
     fee_bps: float = 10.0
+    fee_leg_1_bps: float = 10.0
+    fee_leg_2_bps: float = 10.0
+    fee_leg_3_bps: float = 10.0
     max_slippage_bps: float = 3.0
     capital_allocation_pct: float = 0.95
     safety_reserve_usdt: float = 1.0
@@ -38,6 +41,7 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
+        legacy_fee = float(os.getenv("FEE_BPS", cls.fee_bps))
         return cls(
             api_base=os.getenv("BINANCE_API_BASE", cls.api_base).strip().rstrip("/"),
             ws_base=os.getenv("BINANCE_WS_BASE", cls.ws_base).strip().rstrip("/"),
@@ -51,7 +55,10 @@ class Config:
             min_expected_profit_usdt=max(0.0, float(os.getenv("MIN_EXPECTED_PROFIT_USDT", cls.min_expected_profit_usdt))),
             min_trade_notional_usdt=max(0.0, float(os.getenv("MIN_TRADE_NOTIONAL_USDT", cls.min_trade_notional_usdt))),
             max_notional_usdt=max(0.0, float(os.getenv("MAX_NOTIONAL_USDT", cls.max_notional_usdt))),
-            fee_bps=max(0.0, float(os.getenv("FEE_BPS", cls.fee_bps))),
+            fee_bps=legacy_fee,
+            fee_leg_1_bps=max(0.0, float(os.getenv("FEE_LEG_1_BPS", legacy_fee))),
+            fee_leg_2_bps=max(0.0, float(os.getenv("FEE_LEG_2_BPS", legacy_fee))),
+            fee_leg_3_bps=max(0.0, float(os.getenv("FEE_LEG_3_BPS", legacy_fee))),
             max_slippage_bps=max(0.0, float(os.getenv("MAX_SLIPPAGE_BPS", cls.max_slippage_bps))),
             capital_allocation_pct=float(os.getenv("ARB_CAPITAL_ALLOCATION_PCT", cls.capital_allocation_pct)),
             safety_reserve_usdt=max(0.0, float(os.getenv("ARB_SAFETY_RESERVE_USDT", cls.safety_reserve_usdt))),
@@ -88,5 +95,8 @@ class Config:
             raise ValueError("ARB_CAPITAL_ALLOCATION_PCT must be in (0,1]")
         if self.max_consecutive_losses <= 0 or self.max_drawdown_pct <= 0:
             raise ValueError("risk limits must be positive")
+        for fee in (self.fee_leg_1_bps, self.fee_leg_2_bps, self.fee_leg_3_bps):
+            if not 0 <= fee < 10000:
+                raise ValueError("each leg fee must be in [0, 10000) bps")
         if self.simulation_balance_usdt < self.min_trade_notional_usdt and self.dry_run:
             raise ValueError("SIMULATION_BALANCE_USDT must cover MIN_TRADE_NOTIONAL_USDT in dry-run mode")
