@@ -52,7 +52,14 @@ def approved(net_bps: Decimal, min_net_bps: float, notional: Decimal, max_notion
     return True
 
 
-def risk_budget(free_usdt: Decimal, capital_allocation_pct: float, max_notional: float, min_trade_notional: Decimal | None = None, *, safety_reserve_usdt: Decimal = Decimal("0"), risk_state: RiskState | None = None) -> Decimal:
+def risk_budget(free_usdt: Decimal, allocation_or_legacy: float, max_notional: float, min_trade_notional: Decimal | None = None, *, safety_reserve_usdt: Decimal = Decimal("0"), risk_state: RiskState | None = None, capital_allocation_pct: float | None = None) -> Decimal:
+    """Return deployable capital while accepting the legacy call shape.
+
+    New callers pass the allocation as the second positional argument.
+    Older callers may also supply capital_allocation_pct by keyword; when
+    present it is authoritative and the legacy second positional value is
+    ignored rather than causing a duplicate-argument error.
+    """
     state = risk_state or RISK_STATE
     free = Decimal(str(free_usdt))
     if not state.can_trade() or free <= 0:
@@ -60,7 +67,8 @@ def risk_budget(free_usdt: Decimal, capital_allocation_pct: float, max_notional:
     available = free - max(Decimal("0"), Decimal(str(safety_reserve_usdt)))
     if available <= 0:
         return Decimal("0")
-    pct = Decimal(str(capital_allocation_pct))
+    pct_value = capital_allocation_pct if capital_allocation_pct is not None else allocation_or_legacy
+    pct = Decimal(str(pct_value))
     if pct <= 0:
         return Decimal("0")
     budget = available * pct
