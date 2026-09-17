@@ -41,6 +41,20 @@ def _state(**updates):
         return dict(STATE)
 
 
+def _score(net_bps):
+    return max(0.0, min(100.0, 40.0 + float(net_bps) - 3.0))
+
+
+def _tier(score):
+    if score >= 90: return "S"
+    if score >= 85: return "A+"
+    if score >= 80: return "A"
+    if score >= 70: return "B+"
+    if score >= 60: return "B"
+    if score >= 40: return "C"
+    return "D"
+
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         route = self.path.split("?", 1)[0]
@@ -111,7 +125,6 @@ async def _run(cfg: Config):
         ticker = client.ticker_24hr()
         ranked_symbols = _top_symbols(ticker, cfg.max_ws_symbols)
         triangles = build_triangles(exchange_info, cfg.max_triangles)
-        # Select only triangles whose three legs are in the bounded market-data universe.
         universe = set(ranked_symbols)
         needed = sorted({s for t in triangles for s in t.symbols if s in filters and s in universe})
         if len(needed) > cfg.max_ws_symbols:
@@ -121,17 +134,9 @@ async def _run(cfg: Config):
         selected = set(needed)
         triangles = [t for t in triangles if all(s in selected for s in t.symbols)]
         md = MarketData(cfg.ws_base, needed, cfg.depth_levels, cfg.stale_ms, cfg.api_base, shard_size=cfg.ws_shard_size)
-        _state(
-            platform_capacity=cfg.max_platforms,
-            symbols_per_platform_capacity=cfg.max_symbols_per_platform,
-            symbols=len(needed), triangles=len(triangles),
-            ws_total_shards=max(1, len(md._shards())), ws_health="connecting",
-            health="starting", dry_run=cfg.dry_run,
-            live=cfg.live_trading and not cfg.dry_run,
-        )
+        _state(platform_capacity=cfg.max_platforms, symbols_per_platform_capacity=cfg.max_symbols_per_platform, symbols=len(needed), triangles=len(triangles), ws_total_shards=max(1, len(md._shards())), ws_health="connecting", health="starting", dry_run=cfg.dry_run, live=cfg.live_trading and not cfg.dry_run)
         ws_task = asyncio.create_task(md.run())
 
-        # Dry-run uses an explicit simulation balance. Live mode reads Binance account state.
         balance = Decimal(str(cfg.simulation_balance_usdt))
         if cfg.live_trading and not cfg.dry_run:
             account = client.account()
@@ -151,23 +156,12 @@ async def _run(cfg: Config):
             connected_shards = md.connected_shards
             total_shards = md.total_shards or max(1, len(md._shards()))
             ws_healthy = connected_shards == total_shards and total_shards > 0
-            _state(
-                ws_connected_shards=connected_shards, ws_total_shards=total_shards,
-                ws_health="healthy" if ws_healthy else ("degraded" if connected_shards else "reconnecting"),
-                ws_reconnects=md.reconnects, ws_disconnects=md.disconnects,
-                depth_updates=md.valid_updates, ws_messages=md.ws_messages,
-                ws_invalid_messages=md.invalid_messages, rest_bootstrap_ok=md.bootstrap_ok,
-                rest_bootstrap_failed=md.bootstrap_failed, scans=cycle,
-            )
+            _state(ws_connected_shards=connected_shards, ws_total_shards=total_shards, ws_health="healthy" if ws_healthy else ("degraded" if connected_shards else "reconnecting"), ws_reconnects=md.reconnects, ws_disconnects=md.disconnects, depth_updates=md.valid_updates, ws_messages=md.ws_messages, ws_invalid_messages=md.invalid_messages, rest_bootstrap_ok=md.bootstrap_ok, rest_bootstrap_failed=md.bootstrap_failed, scans=cycle)
             if not connected_shards:
                 await asyncio.sleep(0.25)
                 continue
 
-            budget = risk_budget(
-                balance, cfg.capital_allocation_pct, cfg.max_notional_usdt,
-                Decimal(str(cfg.min_trade_notional_usdt)),
-                safety_reserve_usdt=Decimal(str(cfg.safety_reserve_usdt)), risk_state=risk,
-            )
+            budget = risk_budget(balance, cfg.capital_allocation_pct, cfg.max_notional_usdt, Decimal(str(cfg.min_trade_notional_usdt)), safety_reserve_usdt=Decimal(str(cfg.safety_reserve_usdt)), risk_state=risk)
             best = None
             candidates = []
             for tri in triangles:
@@ -180,46 +174,20 @@ async def _run(cfg: Config):
                 if len(books) != 3:
                     telemetry.candidate(tri.symbols, status="REJECT", reason="NO_LIQUIDITY")
                     continue
-                result = calculate(
-                    tri.symbols, tri.assets, books,
-                    {s: (filters[s]["baseAsset"], filters[s]["quoteAsset"]) for s in tri.symbols},
-                    budget, cfg.fee_bps, cfg.max_slippage_bps,
-                )
+                result = calculate(tri.symbols, tri.assets, books, {s: (filters[s]["baseAsset"], filters[s]["quoteAsset"]) for s in tri.symbols}, budget, cfg.fee_bps, cfg.max_slippage_bps)
                 if result is None:
                     telemetry.candidate(tri.symbols, status="REJECT", reason="INSUFFICIENT_DEPTH")
                     continue
-                eligible = (
-                    risk.can_trade()
-                    and result.net_bps >= Decimal(str(cfg.min_net_edge_bps))
-                    and result.net_pnl_usdt >= Decimal(str(cfg.min_expected_profit_usdt))
-                    and budget >= Decimal(str(cfg.min_trade_notional_usdt))
-                )
+                eligible = risk.can_trade() and result.net_bps >= Decimal(str(cfg.min_net_edge_bps)) and result.net_pnl_usdt >= Decimal(str(cfg.min_expected_profit_usdt)) and budget >= Decimal(str(cfg.min_trade_notional_usdt))
                 reason = None if eligible else ("BELOW_NET_EDGE" if result.net_bps < Decimal(str(cfg.min_net_edge_bps)) else "RISK_LIMIT")
                 telemetry.candidate(tri.symbols, status="ACCEPT" if eligible else "REJECT", reason=reason, result=result, notional=budget)
-                item = {
-                    "path": tri.symbols, "net_bps": float(result.net_bps),
-                    "gross_bps": float(result.gross_bps), "eligible": eligible,
-                    "rejection_reason": reason, "evaluation_notional": str(budget),
-                    "trade_budget": str(budget), "depth_drag_bps": float(result.depth_drag_bps),
-                    "fee_drag_bps": float(result.fee_drag_bps), "safety_bps": float(result.safety_bps),
-                    "break_even_gross_bps": float(result.break_even_gross_bps),
-                }
+                item = {"path": tri.symbols, "net_bps": float(result.net_bps), "gross_bps": float(result.gross_bps), "score": _score(result.net_bps), "tier": _tier(_score(result.net_bps)), "eligible": eligible, "rejection_reason": reason, "evaluation_notional": str(budget), "trade_budget": str(budget), "depth_drag_bps": float(result.depth_drag_bps), "fee_drag_bps": float(result.fee_drag_bps), "safety_bps": float(result.safety_bps), "break_even_gross_bps": float(result.break_even_gross_bps)}
                 candidates.append(item)
                 if eligible and (best is None or result.net_bps > best[0].net_bps):
                     best = (result, tri)
 
             candidates.sort(key=lambda x: x["net_bps"], reverse=True)
-            _state(
-                universe_top=candidates[:50],
-                universe_qualified=sum(1 for x in candidates if x["net_bps"] > 0),
-                universe_rejected=sum(1 for x in candidates if not x["eligible"]),
-                universe_execution_ready=sum(1 for x in candidates if x["eligible"]),
-                universe_selected=1 if best else 0, opportunities=len(candidates),
-                best_net_edge_bps=candidates[0]["net_bps"] if candidates else 0.0,
-                top_opportunities=candidates[:20],
-                universe_cycle_ms=(time.perf_counter() - started) * 1000,
-                universe_last_cycle_at=now,
-            )
+            _state(universe_top=candidates[:50], universe_qualified=sum(1 for x in candidates if x["net_bps"] > 0), universe_rejected=sum(1 for x in candidates if not x["eligible"]), universe_execution_ready=sum(1 for x in candidates if x["eligible"]), universe_selected=1 if best else 0, opportunities=len(candidates), best_net_edge_bps=candidates[0]["net_bps"] if candidates else 0.0, top_opportunities=candidates[:20], universe_cycle_ms=(time.perf_counter() - started) * 1000, universe_last_cycle_at=now)
 
             if best and risk.can_trade() and (now - last_trade) * 1000 >= cfg.cooldown_ms:
                 result, tri = best
@@ -230,17 +198,12 @@ async def _run(cfg: Config):
                         _state(ledger_filled=STATE["ledger_filled"] + 1, last_execution=execution)
                     except Exception as exc:
                         telemetry.record("EXECUTION_REJECT", str(exc), path=list(tri.symbols))
-                        risk.record(Decimal("0"), balance, max_consecutive_losses=cfg.max_consecutive_losses, max_drawdown_pct=cfg.max_drawdown_pct)
                 else:
                     telemetry.record("DRY_RUN", f"selected {tri.symbols} net={result.net_bps:.3f}bps")
                     last_trade = time.time()
 
             snap = telemetry.snapshot()
-            _state(
-                recent=snap.get("recent", [])[-50:],
-                controls={"kill_switch": risk.kill_switch},
-                health="healthy" if connected_shards else "degraded",
-            )
+            _state(recent=snap.get("recent", [])[-50:], controls={"kill_switch": risk.kill_switch}, health="healthy" if connected_shards else "degraded")
             await asyncio.sleep(max(0.05, cfg.cooldown_ms / 1000.0 if cfg.cooldown_ms else 0.30))
     except Exception as exc:
         _state(health="failed", warnings=STATE.get("warnings", []) + [str(exc)[:500]])
