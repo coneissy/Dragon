@@ -114,12 +114,7 @@ def _safety_bps(path, assets, books, symbol_meta, start, cap_bps):
 
 
 def calculate(path, assets, books, symbol_meta, start_usdt, fee_bps, safety_cap_bps):
-    """Authoritative executable triangular calculation using actual depth.
-
-    Fees are charged once per leg on the received asset. Depth is walked level
-    by level. Safety is an explicit conservative haircut, never hidden inside
-    the fee or slippage terms.
-    """
+    """Authoritative three-leg calculation using actual depth and one fee per leg."""
     start = Decimal(str(start_usdt))
     fee = Decimal(str(fee_bps))
     if len(path) != 3 or len(assets) != 3 or start <= ZERO or fee < ZERO:
@@ -131,7 +126,6 @@ def calculate(path, assets, books, symbol_meta, start_usdt, fee_bps, safety_cap_
     net_amount = start
     gross_amount = start
     top_amount = start
-    fee_total = ZERO
     legs = []
 
     for i, symbol in enumerate(path):
@@ -148,17 +142,15 @@ def calculate(path, assets, books, symbol_meta, start_usdt, fee_bps, safety_cap_
         net_before = _walk(book, side, net_amount)
         gross_before = _walk(book, side, gross_amount)
         top_before = _top_output(book, side, top_amount)
-        top_net = _top_output(book, side, net_amount)
-        if None in (net_before, gross_before, top_before, top_net):
+        if None in (net_before, gross_before, top_before):
             return None
         if min(net_before, gross_before, top_before) <= ZERO:
             return None
 
         leg_fee = net_before * fee / BPS
         net_after = net_before * factor
-        leg_depth_drag = max(ZERO, (top_net - net_before) / start * BPS)
-        fee_total += leg_fee
-        legs.append(LegResult(symbol, side, assets[i], assets[(i + 1) % 3], net_amount, net_before, net_after, leg_fee, top_net, leg_depth_drag))
+        leg_depth_drag = max(ZERO, (top_before - gross_before) / top_amount * BPS)
+        legs.append(LegResult(symbol, side, assets[i], assets[(i + 1) % 3], net_amount, net_before, net_after, leg_fee, top_before, leg_depth_drag))
         net_amount = net_after
         gross_amount = gross_before
         top_amount = top_before
@@ -170,20 +162,16 @@ def calculate(path, assets, books, symbol_meta, start_usdt, fee_bps, safety_cap_
     net_pnl = final - start
     gross_bps = gross_pnl / start * BPS
     net_bps = net_pnl / start * BPS
-    fee_drag = fee_total / start * BPS
-    depth_drag = max(ZERO, (top_amount - gross_amount) / start * BPS)
 
-    # Break-even is the gross edge required before depth, fees and safety.
-    # It is independent of the observed triangle's gross return.  The
-    # executable net multiplier after costs is C = D * F^3 * S, where D is
-    # the depth-retention factor, F the per-leg fee factor, and S the safety
-    # factor.  A top-of-book gross multiplier G breaks even when G*C = 1.
-    # Therefore BE = (1/C - 1) * 10000 bps.
+    # Fee drag is the exact compounded loss of three identical fee factors.
+    fee_drag = (ONE - factor ** 3) * BPS
+    # Depth drag compares executable depth-walked output with top-of-book output.
+    depth_drag = max(ZERO, (top_amount - gross_amount) / top_amount * BPS)
+
     depth_factor = gross_amount / top_amount if top_amount > ZERO else ZERO
     cost_factor = depth_factor * (factor ** 3) * safety_factor
     break_even = (ONE / cost_factor - ONE) * BPS if cost_factor > ZERO else ZERO
-    if break_even < ZERO:
-        break_even = ZERO
+    break_even = max(ZERO, break_even)
 
     return Calculation(tuple(path), tuple(assets), start, final, gross_pnl, net_pnl,
                        gross_bps, net_bps, fee_drag, depth_drag, safety,
