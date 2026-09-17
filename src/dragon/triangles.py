@@ -41,25 +41,48 @@ def build_triangles(exchange_info: dict, max_triangles: int = 5000):
     return out
 
 
+def _meta_for_triangle(t):
+    """Derive symbol metadata from the triangle asset transitions.
+
+    This keeps evaluation deterministic when callers only have Triangle + books;
+    exchange-info metadata can still be supplied explicitly by production code.
+    """
+    meta = {}
+    for i, symbol in enumerate(t.symbols):
+        src, dst = t.assets[i], t.assets[(i + 1) % 3]
+        if src == "USDT":
+            meta[symbol] = (dst, src)
+        else:
+            meta[symbol] = (src, dst)
+    return meta
+
+
 def evaluate_triangle_outcome(t, books, fee_bps, slippage_bps, symbol_meta=None, notional_usdt=1.0):
-    result = calculate(t.symbols, t.assets, books, symbol_meta or {}, notional_usdt, fee_bps, slippage_bps)
+    result = calculate(t.symbols, t.assets, books, symbol_meta or _meta_for_triangle(t), notional_usdt, fee_bps, slippage_bps)
     if result is None:
         return None
+    fee_equivalent = result.start_usdt * result.fee_drag_bps / 10000
+    post_fee_final = result.final_usdt / (1 - result.safety_bps / 10000) if result.safety_bps < 10000 else 0
     return {
         "start_usdt": result.start_usdt,
         "final_usdt": result.final_usdt,
+        "post_fee_final": post_fee_final,
         "gross_pnl_usdt": result.gross_pnl_usdt,
         "gross_bps": result.gross_bps,
         "net_pnl_usdt": result.net_pnl_usdt,
         "net_bps": result.net_bps,
         "fee_drag_bps": result.fee_drag_bps,
+        "fee_drag_equivalent_usdt": fee_equivalent,
+        "actual_fee_total_usdt": sum((leg.fee for leg in result.legs), result.start_usdt * 0),
         "depth_drag_bps": result.depth_drag_bps,
+        "depth_adjusted_gross_bps": result.gross_bps - result.depth_drag_bps,
         "safety_bps": result.safety_bps,
         "break_even_gross_bps": result.break_even_gross_bps,
+        "cost_to_break_even_bps": result.break_even_gross_bps - result.gross_bps,
         "path": result.path,
         "first_asset": result.assets[1],
         "second_asset": result.assets[2],
-        "legs": [vars(leg) for leg in result.legs],
+        "legs": [dict(vars(leg), fee_bps=str(fee_bps), top_price=str(leg.top_output)) for leg in result.legs],
     }
 
 
