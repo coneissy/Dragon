@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import os
+import re
 import time
 from decimal import Decimal
 from urllib.parse import urlencode
@@ -78,19 +79,60 @@ class BinanceClient:
         retry_after = response.headers.get("Retry-After") if response is not None else None
         try:
             if retry_after:
-                return min(15.0, max(0.5, float(retry_after)))
+                return min(30.0, max(0.5, float(retry_after)))
         except (ValueError, TypeError):
             pass
-        return min(15.0, 1.0 * (2 ** attempt))
+        return min(30.0, 1.0 * (2 ** attempt))
+
+    @staticmethod
+    def _ban_until_ms(response) -> int | None:
+        if response is None:
+            return None
+        try:
+            payload = response.json()
+            message = str(payload.get("msg", ""))
+        except ValueError:
+            message = response.text
+        match = re.search(r"IP banned until (\d+)", message, re.IGNORECASE)
+        return int(match.group(1)) if match else None
 
     def public(self, path: str, params=None):
+        """Public REST call with safe backoff; never amplifies a Binance IP ban."""
         for attempt in range(5):
             try:
                 r = self.http.get(self.base + path, params=params or {})
-                if r.status_code in (418, 429) or 500 <= r.status_code < 600:
-                    if attempt < 4:
-                        time.sleep(self._retry_delay(r, attempt))
-                        continue
+            except httpx.HTTPError as exc:
+                if attempt < 4:
+                    time.sleep(self._retry_delay(None, attempt))
+                    continue
+                raise BinanceError(f"public request failed: {exc}") from exc
+
+            if r.status_code == 418:
+                # A 418 is an IP ban, not a transient request failure. Retrying immediately
+                # only extends the ban. Wait until Binance's advertised expiry, then retry.
+                until_ms = self._ban_until_ms(r)
+                if until_ms:
+                    wait_s = max(1.0, (until_ms - int(time.time() * 1000)) / 1000.0 + 1.0)
+                    print(f"DRAGON BINANCE | IP ban active; backing off {wait_s:.1f}s", flush=True)
+                    time.sleep(wait_s)
+                    continue
+                raise BinanceError(
+                    f"public request blocked by Binance HTTP 418: {r.text[:500]}",
+                    status_code=418,
+                )
+
+            if r.status_code == 429:
+                if attempt < 4:
+                    delay = self._retry_delay(r, attempt)
+                    print(f"DRAGON BINANCE | rate limited; backing off {delay:.1f}s", flush=True)
+                    time.sleep(delay)
+                    continue
+
+            if 500 <= r.status_code < 600 and attempt < 4:
+                time.sleep(self._retry_delay(r, attempt))
+                continue
+
+            try:
                 r.raise_for_status()
                 return r.json()
             except httpx.HTTPStatusError as exc:
@@ -98,8 +140,9 @@ class BinanceClient:
                     f"public request failed: {exc.response.text[:500]}",
                     status_code=exc.response.status_code,
                 ) from exc
-            except (httpx.HTTPError, ValueError) as exc:
-                raise BinanceError(f"public request failed: {exc}") from exc
+            except ValueError as exc:
+                raise BinanceError(f"public request returned invalid JSON: {exc}") from exc
+
         raise BinanceError("public request retry limit exceeded")
 
     def sync_time(self):
@@ -157,7 +200,15 @@ class BinanceClient:
             if method == "GET":
                 for attempt in range(4):
                     r = self.http.get(self.base + path + "?" + wire, headers=headers)
-                    if r.status_code in (418, 429) and attempt < 3:
+                    if r.status_code == 418:
+                        until_ms = self._ban_until_ms(r)
+                        if until_ms:
+                            wait_s = max(1.0, (until_ms - int(time.time() * 1000)) / 1000.0 + 1.0)
+                            print(f"DRAGON BINANCE | signed IP ban active; backing off {wait_s:.1f}s", flush=True)
+                            time.sleep(wait_s)
+                            continue
+                        break
+                    if r.status_code == 429 and attempt < 3:
                         time.sleep(self._retry_delay(r, attempt))
                         continue
                     break
