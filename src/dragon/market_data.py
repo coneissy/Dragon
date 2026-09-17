@@ -3,7 +3,7 @@ import asyncio
 import json
 import random
 import time
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Dict
 
 import httpx
@@ -14,7 +14,7 @@ class MarketData:
     def __init__(self, ws_base: str, symbols, depth_levels=5, stale_ms=1500, api_base="https://api.binance.com", shard_size=40):
         self.ws_base = ws_base.rstrip("/")
         self.api_base = api_base.rstrip("/")
-        self.symbols = tuple(sorted({str(s).upper() for s in symbols}))
+        self.symbols = tuple(sorted({str(s).strip().upper() for s in symbols if str(s).strip()}))
         self.depth_levels = max(5, min(20, int(depth_levels)))
         self.stale_ms = max(250, int(stale_ms))
         self.shard_size = max(1, min(100, int(shard_size)))
@@ -22,6 +22,7 @@ class MarketData:
         self.last_message_ms = 0
         self.valid_updates = 0
         self.invalid_messages = 0
+        self.rejected_updates = 0
         self.connected = False
         self.connected_shards = 0
         self.total_shards = 0
@@ -30,6 +31,7 @@ class MarketData:
         self.bootstrap_ok = 0
         self.bootstrap_failed = 0
         self.ws_messages = 0
+        self._connected_ids = set()
         self._lock = asyncio.Lock()
         self._logged_first_snapshot = set()
         self._logged_first_message = set()
@@ -50,15 +52,52 @@ class MarketData:
     def _clean_levels(levels, limit):
         out = []
         for level in (levels or [])[:limit]:
-            if len(level) < 2:
+            if not isinstance(level, (list, tuple)) or len(level) < 2:
                 continue
             try:
-                p, q = Decimal(str(level[0])), Decimal(str(level[1]))
-            except Exception:
+                price = Decimal(str(level[0]))
+                quantity = Decimal(str(level[1]))
+            except (InvalidOperation, TypeError, ValueError):
                 continue
-            if p > 0 and q > 0:
-                out.append((str(p), str(q)))
+            if price.is_finite() and quantity.is_finite() and price > 0 and quantity > 0:
+                out.append((str(price), str(quantity)))
         return out
+
+    @staticmethod
+    def _best_price(levels):
+        return Decimal(str(levels[0][0])) if levels else None
+
+    def _is_valid_book(self, bids, asks):
+        bid = self._best_price(bids)
+        ask = self._best_price(asks)
+        return bid is not None and ask is not None and bid < ask
+
+    def _accept(self, symbol, bids, asks, event_ts, update_id, source):
+        if not self._is_valid_book(bids, asks):
+            self.rejected_updates += 1
+            return False
+        previous = self.books.get(symbol)
+        previous_id = previous.get("last_update_id") if previous else None
+        if update_id is not None and previous_id is not None:
+            try:
+                if int(update_id) < int(previous_id):
+                    self.rejected_updates += 1
+                    return False
+            except (TypeError, ValueError):
+                pass
+        now = time.time_ns() // 1_000_000
+        self.books[symbol] = {
+            "bids": bids,
+            "asks": asks,
+            "updated_ms": now,
+            "depth_ts": now,
+            "event_ts": int(event_ts),
+            "last_update_id": update_id,
+            "_source": source,
+        }
+        self.last_message_ms = now
+        self.valid_updates += 1
+        return True
 
     def update_from_payload(self, payload):
         data = payload.get("data", payload) if isinstance(payload, dict) else {}
@@ -72,36 +111,18 @@ class MarketData:
             self.invalid_messages += 1
             return False
         now = time.time_ns() // 1_000_000
-        # Store one canonical schema. updated_ms is the only freshness clock.
-        self.books[symbol] = {
-            "bids": bids,
-            "asks": asks,
-            "updated_ms": now,
-            "depth_ts": now,
-            "event_ts": int(data.get("E", now)),
-            "last_update_id": data.get("u"),
-            "_source": "binance_ws_depth",
-        }
-        self.last_message_ms = now
-        self.valid_updates += 1
-        return True
+        return self._accept(symbol, bids, asks, data.get("E", now), data.get("u"), "binance_ws_depth")
 
     def _update_rest_book(self, symbol, payload):
+        symbol = str(symbol).upper()
+        if symbol not in self.symbols or not isinstance(payload, dict):
+            self.bootstrap_failed += 1
+            return False
         bids = self._clean_levels(payload.get("bids") or payload.get("b"), self.depth_levels)
         asks = self._clean_levels(payload.get("asks") or payload.get("a"), self.depth_levels)
         if not bids or not asks:
             return False
-        now = time.time_ns() // 1_000_000
-        self.books[symbol.upper()] = {
-            "bids": bids,
-            "asks": asks,
-            "updated_ms": now,
-            "depth_ts": now,
-            "event_ts": now,
-            "last_update_id": payload.get("lastUpdateId"),
-            "_source": "binance_rest_depth_bootstrap",
-        }
-        return True
+        return self._accept(symbol, bids, asks, time.time_ns() // 1_000_000, payload.get("lastUpdateId"), "binance_rest_depth_bootstrap")
 
     async def bootstrap(self):
         sem = asyncio.Semaphore(12)
@@ -126,43 +147,48 @@ class MarketData:
         print(f"DRAGON REST_BOOTSTRAP | ok={sum(bool(x) for x in results)} failed={self.bootstrap_failed} symbols={len(self.symbols)}", flush=True)
 
     def fresh(self, symbol):
-        book = self.books.get(symbol.upper())
+        book = self.books.get(str(symbol).upper())
         if not book:
             return False
-        return (time.time_ns() // 1_000_000) - int(book.get("updated_ms", 0)) <= self.stale_ms
+        age = (time.time_ns() // 1_000_000) - int(book.get("updated_ms", 0))
+        return 0 <= age <= self.stale_ms and self._is_valid_book(book.get("bids", []), book.get("asks", []))
 
     def fresh_books(self, symbols):
-        return all(self.fresh(s) for s in symbols)
+        normalized = tuple(dict.fromkeys(str(s).upper() for s in symbols))
+        return bool(normalized) and all(self.fresh(s) for s in normalized)
 
     def snapshot(self, symbols):
-        """Return a consistent local snapshot for a triangle evaluation."""
-        return {s.upper(): dict(self.books[s.upper()]) for s in symbols if s.upper() in self.books}
+        normalized = tuple(dict.fromkeys(str(s).upper() for s in symbols))
+        if not normalized or not self.fresh_books(normalized):
+            return {}
+        return {s: dict(self.books[s]) for s in normalized}
 
     def stale_symbols(self, symbols):
         now = time.time_ns() // 1_000_000
         out = []
-        for symbol in symbols:
-            book = self.books.get(symbol.upper())
+        for symbol in dict.fromkeys(str(s).upper() for s in symbols):
+            book = self.books.get(symbol)
             if not book:
-                out.append(symbol.upper())
+                out.append(symbol)
                 continue
             age = now - int(book.get("updated_ms", 0))
-            if age > self.stale_ms:
-                out.append(f"{symbol.upper()}:{age}ms")
+            if age < 0 or age > self.stale_ms or not self._is_valid_book(book.get("bids", []), book.get("asks", [])):
+                out.append(f"{symbol}:{max(age, 0)}ms")
         return out
 
     async def _run_shard(self, shard_id, symbols):
         attempt = 0
         while True:
+            connected_here = False
             try:
-                for symbol in symbols:
-                    self.books.pop(symbol, None)
                 async with websockets.connect(
                     self._url(symbols), ping_interval=10, ping_timeout=10,
                     close_timeout=5, open_timeout=15, max_size=2**20,
                     max_queue=8192, compression=None,
                 ) as ws:
-                    self.connected_shards += 1
+                    connected_here = True
+                    self._connected_ids.add(shard_id)
+                    self.connected_shards = len(self._connected_ids)
                     self.connected = self.connected_shards == self.total_shards
                     attempt = 0
                     print(f"DRAGON WS | shard={shard_id} connected symbols={len(symbols)} connected_shards={self.connected_shards}/{self.total_shards} depth={self.depth_levels}", flush=True)
@@ -190,23 +216,24 @@ class MarketData:
                 print(f"DRAGON WS | shard={shard_id} disconnected reason={exc!s} reconnect_in={delay:.2f}s", flush=True)
                 await asyncio.sleep(delay)
             finally:
-                if self.connected_shards > 0:
-                    self.connected_shards -= 1
-                self.connected = self.connected_shards == self.total_shards and self.total_shards > 0
-                for symbol in symbols:
-                    self.books.pop(symbol, None)
+                if connected_here:
+                    self._connected_ids.discard(shard_id)
+                    self.connected_shards = len(self._connected_ids)
+                    self.connected = self.connected_shards == self.total_shards and self.total_shards > 0
 
     async def run(self):
         if not self.symbols:
             raise RuntimeError("no Binance symbols selected for market data")
         shards = self._shards()
         self.total_shards = len(shards)
+        await self.bootstrap()
         tasks = [asyncio.create_task(self._run_shard(i + 1, shard)) for i, shard in enumerate(shards)]
         try:
-            await asyncio.sleep(0)
-            await self.bootstrap()
             await asyncio.gather(*tasks)
         finally:
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            self._connected_ids.clear()
+            self.connected_shards = 0
+            self.connected = False
