@@ -11,12 +11,13 @@ import websockets
 
 
 class MarketData:
-    def __init__(self, ws_base: str, symbols, depth_levels=5, stale_ms=1500, api_base="https://api.binance.com"):
+    def __init__(self, ws_base: str, symbols, depth_levels=5, stale_ms=1500, api_base="https://api.binance.com", shard_size=40):
         self.ws_base = ws_base.rstrip("/")
         self.api_base = api_base.rstrip("/")
         self.symbols = tuple(sorted({str(s).upper() for s in symbols}))
         self.depth_levels = max(5, min(20, int(depth_levels)))
         self.stale_ms = max(250, int(stale_ms))
+        self.shard_size = max(1, min(100, int(shard_size)))
         self.books: Dict[str, dict] = {}
         self.last_message_ms = 0
         self.valid_updates = 0
@@ -34,8 +35,7 @@ class MarketData:
         self._logged_first_message = set()
 
     def _shards(self):
-        shard_size = 40
-        return [self.symbols[i:i + shard_size] for i in range(0, len(self.symbols), shard_size)]
+        return [self.symbols[i:i + self.shard_size] for i in range(0, len(self.symbols), self.shard_size)]
 
     def _url(self, symbols):
         base = self.ws_base
