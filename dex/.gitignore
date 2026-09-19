@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.env
+*.log
+
+# Foundry
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+.idea/
+.claude/
+logs/
+.DS_Store
+v3-core/
