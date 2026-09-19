@@ -1,0 +1,319 @@
+/* ===== Design System Tokens ===== */
+:root {
+  --bg-primary: #0a0a0f;
+  --bg-secondary: #12121a;
+  --bg-hover: #1a1a28;
+
+  --text-primary: #e2e2ea;
+  --text-secondary: #8888a0;
+  --text-muted: #555570;
+
+  --border: #1e1e2e;
+  --border-heavy: #2a2a3a;
+
+  --green: #00d672;
+  --red: #ff4757;
+  --amber: #ffb627;
+  --blue: #4c9aff;
+
+  --font-text: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+/* ===== Reset & Base ===== */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-text);
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+/* ===== Custom Scrollbar ===== */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-heavy);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* ===== App Layout ===== */
+.app {
+  min-height: 100vh;
+}
+
+.app__empty {
+  padding: 48px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 1rem;
+}
+
+/* ===== Header ===== */
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 24px;
+  background-color: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  backdrop-filter: blur(8px);
+}
+
+.header__title {
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.header__stats {
+  display: flex;
+  gap: 24px;
+  align-items: center;
+}
+
+.header__stat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.header__label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.header__value {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.header__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.header__dot--connected {
+  background-color: var(--green);
+  box-shadow: 0 0 6px var(--green), 0 0 12px rgba(0, 214, 114, 0.3);
+}
+
+.header__dot--disconnected {
+  background-color: var(--red);
+  box-shadow: 0 0 6px var(--red), 0 0 12px rgba(255, 71, 87, 0.3);
+}
+
+.header__status-text {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+/* ===== Pool Table ===== */
+.pool-table {
+  padding: 16px 24px;
+  overflow-x: auto;
+}
+
+.pool-table__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.pool-table__th {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 2px solid var(--border-heavy);
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.pool-table__th--right {
+  text-align: right;
+}
+
+.pool-table__row {
+  border-bottom: 1px solid var(--border);
+  transition: background-color 0.15s ease;
+}
+
+.pool-table__row:hover {
+  background-color: var(--bg-hover);
+}
+
+.pool-table__row--group-start {
+  border-top: 2px solid var(--border-heavy);
+}
+
+.pool-table__cell {
+  padding: 8px 12px;
+  white-space: nowrap;
+}
+
+.pool-table__cell--right {
+  text-align: right;
+  font-family: var(--font-mono);
+}
+
+.pool-table__cell--fee {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+}
+
+.pool-table__pair {
+  font-weight: 600;
+}
+
+.pool-table__sub-arrow {
+  color: var(--text-muted);
+  padding-left: 8px;
+}
+
+/* ===== Badges ===== */
+.badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+}
+
+.badge--v2 {
+  background-color: rgba(76, 154, 255, 0.12);
+  color: var(--blue);
+}
+
+.badge--v3 {
+  background-color: rgba(0, 214, 114, 0.12);
+  color: var(--green);
+}
+
+.badge--default {
+  background-color: var(--border-heavy);
+  color: var(--text-secondary);
+}
+
+/* ===== Spread Tiers ===== */
+.spread--hot {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--bg-secondary);
+  background-color: var(--green);
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 0.8rem;
+}
+
+.spread--warm {
+  font-family: var(--font-mono);
+  color: var(--amber);
+}
+
+.spread--cold {
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+
+/* ===== Time / Stale ===== */
+.time-ago {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.time-ago--stale {
+  color: var(--red);
+  font-weight: 500;
+}
+
+/* ===== Pool Link ===== */
+.pool-link {
+  color: var(--blue);
+  text-decoration: none;
+  font-size: 0.8rem;
+  opacity: 0.7;
+  transition: opacity 0.15s ease;
+}
+
+.pool-link:hover {
+  opacity: 1;
+  text-decoration: underline;
+}
+
+/* ===== Price Cell ===== */
+.price-cell {
+  padding: 8px 12px;
+  text-align: right;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  transition: background-color 0.6s ease;
+}
+
+.price-cell--flash-up {
+  background-color: rgba(0, 214, 114, 0.2);
+}
+
+.price-cell--flash-down {
+  background-color: rgba(255, 71, 87, 0.2);
+}
+
+/* ===== Responsive ===== */
+@media (max-width: 640px) {
+  .header {
+    flex-direction: column;
+    gap: 8px;
+    align-items: flex-start;
+    padding: 12px 16px;
+  }
+
+  .header__stats {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .pool-table {
+    padding: 8px 12px;
+  }
+
+  .pool-table__cell,
+  .pool-table__th {
+    padding: 6px 8px;
+  }
+}
