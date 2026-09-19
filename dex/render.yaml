@@ -1,0 +1,20 @@
+services:
+  - type: worker
+    name: dragon-dex-arbitrage
+    runtime: node
+    region: frankfurt
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: DRY_RUN
+        value: "true"
+      - key: BASE_RPC_HTTP
+        sync: false
+      - key: BASE_RPC_WS
+        sync: false
+      - key: PRIVATE_KEY
+        sync: false
+      - key: FLASH_ARB_ADDRESS
+        sync: false

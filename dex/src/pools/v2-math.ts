@@ -1,0 +1,1 @@
+export function v2GetAmountOut(amountIn:bigint,reserveIn:bigint,reserveOut:bigint,fee:number):bigint{const D=1000000n;const fs=BigInt(Math.round(fee*1000000));const inFee=amountIn*(D-fs);return inFee*reserveOut/(reserveIn*D+inFee);}

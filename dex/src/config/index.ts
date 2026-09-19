@@ -1,0 +1,4 @@
+import "dotenv/config"; import {privateKeyToAccount} from "viem/accounts"; import {createWalletClient,http} from "viem"; import {base} from "viem/chains";
+function requireEnv(key:string):string{const v=process.env[key];if(!v)throw new Error("Missing env var: "+key);return v;}
+export const config={rpcHttp:requireEnv("BASE_RPC_HTTP"),rpcWs:requireEnv("BASE_RPC_WS"),privateKey:requireEnv("PRIVATE_KEY") as `0x${string}`,flashArbAddress:requireEnv("FLASH_ARB_ADDRESS") as `0x${string}`,dryRun:process.env.DRY_RUN==="true",debugLog:process.env.DEBUG_LOG==="true",logLevel:(process.env.LOG_LEVEL??"info") as "debug"|"info"|"warn"|"error"} as const;
+export const account=privateKeyToAccount(config.privateKey); export const wallet=createWalletClient({account,chain:base,transport:http(config.rpcHttp)});
