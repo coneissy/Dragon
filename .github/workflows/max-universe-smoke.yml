@@ -54,7 +54,7 @@ jobs:
         run: |
           test "$DRY_RUN" = "true"
           test "$LIVE_TRADING" = "false"
-          ! grep -RInE 'LIVE_TRADING\s*=\s*true|DRY_RUN\s*=\s*false' --exclude-dir=.git --exclude='*.md' .
+          ! grep -RInE '^[[:space:]]*(export[[:space:]]+)?(LIVE_TRADING|DRY_RUN)[[:space:]]*=[[:space:]]*(true|false)[[:space:]]*$' --exclude-dir=.git --exclude='*.md' .
 
       - name: Run test suite
         run: python -m pytest -q
